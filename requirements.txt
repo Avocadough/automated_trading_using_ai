@@ -1,0 +1,22 @@
+# Core Data & ML Libraries
+pandas==2.2.2
+numpy==1.23.5
+pyarrow==16.1.0
+
+#--extra-index-url https://download.pytorch.org/whl/cu128
+#torch==2.7.0+cu128 แนะนำติดตั้ง pytorch แยกเอาเองดีกว่าแม่งเรื่องมาก
+
+stable-baselines3==2.3.2
+gymnasium==0.29.1
+
+# Binance API & Backtesting
+python-binance==1.0.19
+vectorbt==0.26.2
+plotly==5.15.0
+
+# Dashboard
+streamlit==1.35.0
+
+# Utilities
+tqdm==4.66.4
+tensorboard==2.16.2
