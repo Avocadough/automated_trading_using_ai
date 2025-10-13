@@ -3,8 +3,15 @@ import numpy as np
 from stable_baselines3 import PPO
 import argparse
 from pathlib import Path
+import sys
+import os
+# หา Path ของ Root Directory (สองระดับขึ้นไปจาก __file__)
+PROJECT_ROOT = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '..', '..' 
+))
+sys.path.append(PROJECT_ROOT)
+# --- จบส่วนที่แก้ไข ---
 
-# Import Environment ของเราจากโปรเจ็ค
 from src.rl_env.crypto_env import CryptoTradingEnv
 
 def backtest_agent(features_path, model_path):
@@ -62,7 +69,7 @@ def backtest_agent(features_path, model_path):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Backtest a trained PPO agent.")
     parser.add_argument("--features", type=str, default="data/features/btc_1h_features.parquet", help="Path to the features file.")
-    parser.add_argument("--model", type=str, default="data/models/ppo_btc_1h.zip", help="Path to the trained PPO model file.")
+    parser.add_argument("--model", type=str, default="data\models\ppo_btc_1h_v2.zip", help="Path to the trained PPO model file.")
     args = parser.parse_args()
 
     backtest_agent(Path(args.features), Path(args.model))
