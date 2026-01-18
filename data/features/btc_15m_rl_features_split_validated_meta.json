@@ -1,0 +1,18 @@
+{
+  "features": [
+    "upper_band_H",
+    "lower_band_L",
+    "MA_fast",
+    "MA_slow"
+  ],
+  "window_size": 64,
+  "ga_params": {
+    "n": 144,
+    "alpha": 3,
+    "d": 13,
+    "beta": 1.440000057220459,
+    "src": "hl2"
+  },
+  "n_rows": 70033,
+  "created_from": "data\\raw\\btc_15m.parquet"
+}

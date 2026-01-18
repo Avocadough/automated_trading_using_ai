@@ -1,0 +1,17 @@
+{
+  "features": [
+    "log_ret_1",
+    "rolling_std_20",
+    "spa_sig_num"
+  ],
+  "window_size": 64,
+  "rows": 898481,
+  "source": "data\\raw\\btc_1h.parquet",
+  "spa_params": {
+    "d": 89,
+    "alpha": 3.0,
+    "gamma": 1.0,
+    "m_ma": 5,
+    "source": "close"
+  }
+}

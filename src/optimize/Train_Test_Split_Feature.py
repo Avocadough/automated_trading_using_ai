@@ -18,9 +18,9 @@ except ImportError:
     print("    Falling back to CPU mode...")
 
 # --- Constants ---
-N_SET = np.array([13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597], dtype=np.int32)
+N_SET = np.array([13, 21, 34, 55, 89, 144, 233, 377], dtype=np.int32)
 ALPHA_SET = np.array([1, 2, 3, 5, 8, 11], dtype=np.int32)
-BETA_SET = np.array([0.38, 0.5, 0.61, 1, 1.44, 1.61, 2.61], dtype=np.float32)
+BETA_SET = np.array([0.38, 0.5, 0.61, 1, 1.44, 1.61], dtype=np.float32)
 D_SET = np.array([2, 3, 5, 8, 13], dtype=np.int32)
 SRC_SET = np.array([0, 1, 2], dtype=np.int32)  # 0=close, 1=hl2, 2=hlc3
 
@@ -385,7 +385,7 @@ if __name__ == "__main__":
     df_val = df_raw.iloc[train_end:val_end].reset_index(drop=True)
     df_test = df_raw.iloc[val_end:].reset_index(drop=True)
     # ✅ Fast test mode
-    MAX_ROWS = 20000
+    MAX_ROWS = 7000
     if len(df_raw) > MAX_ROWS:
         df_raw = df_raw.tail(MAX_ROWS).reset_index(drop=True)
         print(f"[FAST TEST] Using last {MAX_ROWS:,} rows")
@@ -393,8 +393,8 @@ if __name__ == "__main__":
     print("🚀 PHASE 1: Running FULL GPU-ACCELERATED GA...")
     best_params_from_train, train_score = run_genetic_algorithm_full_gpu(
         df_train,
-        population_size=128,
-        generations=50,
+        population_size=32,
+        generations=12,
         mutation_rate=0.2
     )
 
@@ -428,7 +428,7 @@ if __name__ == "__main__":
     print("\n✅ Done! Feature set preview:")
     print(final_df_for_rl[['open', 'close', 'upper_band_H', 'lower_band_L', 'strat_position']].tail())
 
-    output_path = Path("data/features/btc_1m_features.parquet")
+    output_path = Path("data/features/btc_1h_features_split.parquet")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     final_df_for_rl.to_parquet(output_path)
     print(f"\n💾 Saved to: {output_path}")

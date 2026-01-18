@@ -68,8 +68,8 @@ def backtest_agent(features_path, model_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Backtest a trained PPO agent.")
-    parser.add_argument("--features", type=str, default="data/features/btc_1h_features.parquet", help="Path to the features file.")
-    parser.add_argument("--model", type=str, default="data\models\ppo_btc_1h_v2.zip", help="Path to the trained PPO model file.")
+    parser.add_argument("--features", type=str, default="data/features/btc_15m_rl_features_split_validated.parquet", help="Path to the features file.")
+    parser.add_argument("--model", type=str, default="data/models/_eval_spa/best_model.zip", help="Path to the trained PPO model file.")
     args = parser.parse_args()
 
     backtest_agent(Path(args.features), Path(args.model))
