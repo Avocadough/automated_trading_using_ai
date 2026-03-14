@@ -254,8 +254,8 @@ def make_features_spa(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Build SPA + full TA features for RL training")
-    ap.add_argument("--input",           type=str, default="data/raw/btc_15m.parquet")
-    ap.add_argument("--output",          type=str, default="data/features/btc_15m_spa.parquet")
+    ap.add_argument("--input",           type=str, default="data/raw/btc_1h.parquet")
+    ap.add_argument("--output",          type=str, default="data/features/btc_1h_spa.parquet")
     ap.add_argument("--window_size_meta",type=int, default=64)
 
     # SPA params

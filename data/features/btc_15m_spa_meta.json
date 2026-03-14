@@ -7,17 +7,5 @@
     "MACD_hist",
     "spa_sig_num"
   ],
-  "window_size": 64,
-  "freq_hint": "unknown",
-  "periods_per_year": 35040,
-  "train_split": 0.8,
-  "rows": 105195,
-  "source": "data\\raw\\btc_15m.parquet",
-  "spa_params": {
-    "d": 21,
-    "alpha": 5,
-    "gamma": 0.61,
-    "m_ma": 5,
-    "source": "hlc3"
-  }
+  "window_size": 64
 }

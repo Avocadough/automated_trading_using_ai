@@ -44,9 +44,9 @@ def build_env(df: pd.DataFrame, features: list[str], window_size: int):
         features=features,
         window_size=window_size,
         initial_balance=10_000.0,
-        taker_fee=0.001,         # ตรงกับ train env
+        taker_fee=0.0005,        # ตรงกับ train env (Binance Futures)
         position_limit=0.5,
-        slippage_bps=2.0,        # ตรงกับ train env
+        slippage_bps=0.5,        # ตรงกับ train env
         reward_scale=100.0,
         normalize=True,
         action_mode="discrete",
@@ -257,19 +257,19 @@ def run_eval(model_path: Path, features_path: Path, out_csv: Path):
 
 
 def main(
-    model_path: Path = Path("data/models/ppo_spa_btc_15m.zip"),
-    features_path: Path = Path("data/features/btc_15m_spa.parquet"),
-    out_csv: Path = Path("data/eval/ppo_spa_btc_15m_eval.csv"),
+    model_path: Path = Path("data/models/ppo_spa_btc_1h.zip"),
+    features_path: Path = Path("data/features/btc_1h_spa.parquet"),
+    out_csv: Path = Path("data/eval/ppo_spa_btc_1h_eval.csv"),
 ):
     run_eval(model_path, features_path, out_csv)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Evaluate PPO SPA model on held-out data (uses *_meta.json)")
-    ap.add_argument("--model", type=str, default="data/models/ppo_spa_btc_15m.zip")
+    ap.add_argument("--model", type=str, default="data/models/ppo_spa_btc_1h.zip")
     ap.add_argument("--train_split", type=float, default=0.8)
-    ap.add_argument("--features", type=str, default="data/features/btc_15m_spa.parquet")
-    ap.add_argument("--out_csv", type=str, default="data/eval/ppo_spa_btc_15m_eval.csv")
+    ap.add_argument("--features", type=str, default="data/features/btc_1h_spa.parquet")
+    ap.add_argument("--out_csv", type=str, default="data/eval/ppo_spa_btc_1h_eval.csv")
     args = ap.parse_args()
 
     main(
