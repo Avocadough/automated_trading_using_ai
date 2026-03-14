@@ -5,21 +5,16 @@ import argparse
 from pathlib import Path
 import json
 import warnings
+
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(PROJECT_ROOT)
+
+from src.utils import ensure_datetime_index
+
 warnings.filterwarnings('ignore')
 
-def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure DatetimeIndex (UTC), sorted, no dup."""
-    if not isinstance(df.index, pd.DatetimeIndex):
-        for c in ['timestamp', 'time', 'open_time', 'date', 'datetime']:
-            if c in df.columns:
-                df[c] = pd.to_datetime(df[c], utc=True, errors='coerce')
-                df = df.set_index(c)
-                break
-        else:
-            # fallback: try index
-            df.index = pd.to_datetime(df.index, utc=True, errors='coerce')
-    df = df[~df.index.duplicated(keep='last')].sort_index()
-    return df
+
 
 def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
@@ -70,7 +65,7 @@ def create_advanced_features(input_path: Path, output_path: Path, slim: bool, me
 
     print(f"Loading raw data from {input_path}...")
     df = pd.read_parquet(input_path)
-    df = _ensure_datetime_index(df)
+    df = ensure_datetime_index(df)
 
     required_cols = ['open', 'high', 'low', 'close']
     if not all(col in df.columns for col in required_cols):
@@ -149,7 +144,7 @@ def create_advanced_features(input_path: Path, output_path: Path, slim: bool, me
     meta = {
         "features": feature_list,
         "window_size": window_size_meta,
-        "freq_hint": "1H",
+        "freq_hint": pd.infer_freq(df.index) or "1H",
         "created_from": str(input_path),
         "rows": int(len(df))
     }

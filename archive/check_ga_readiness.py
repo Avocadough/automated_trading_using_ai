@@ -42,12 +42,7 @@ def evaluate_ga_df(path: Path, split=0.8, fee=0.0005, slippage=0.0002):
 
     # คำนวณเมตริก
     oos_ret = (cash/100000.0) - 1
-    eq = [100000.0]
-    position = 0
-    for i in range(len(oos)):
-        position = pos[i] if i==0 else pos[i-1]
-        eq.append(eq[-1] + (pos[i]- (pos[i-1] if i>0 else 0))* (-close[i]*(1+fee+slippage) if pos[i]> (pos[i-1] if i>0 else 0) else 0))
-    # ใช้วิธีง่ายกว่า: สร้าง equity จากสัญญาณย่อยๆ ได้ซับซ้อนเกินไปสำหรับสรุปสั้น
+    # equity loop removed (dead code)    # ใช้วิธีง่ายกว่า: สร้าง equity จากสัญญาณย่อยๆ ได้ซับซ้อนเกินไปสำหรับสรุปสั้น
     # เอา returns รายแท่งแบบ proxy:
     r = oos['strat_returns'].fillna(0).values  # มีจากไฟล์ที่คุณสร้าง
     if r.std() > 0:

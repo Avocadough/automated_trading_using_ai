@@ -5,19 +5,16 @@ import vectorbt as vbt
 import argparse
 from pathlib import Path
 import warnings
+
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(PROJECT_ROOT)
+
+from src.utils import ensure_datetime_index
+
 warnings.filterwarnings('ignore')
 
-def ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
-    """พยายามทำให้ DataFrame มี DatetimeIndex ที่เรียงเวลา"""
-    if isinstance(df.index, pd.DatetimeIndex):
-        return df.sort_index()
-    for col in ('timestamp', 'time', 'open_time', 'date', 'Date', 'datetime'):
-        if col in df.columns:
-            idx = pd.to_datetime(df[col], errors='coerce', utc=True)
-            if idx.notna().all():
-                return df.set_index(idx).sort_index()
-    df.index = pd.to_datetime(df.index, errors='coerce', utc=True)
-    return df.sort_index()
+
 
 def check_data_quality(df: pd.DataFrame) -> pd.DataFrame:
     """ตรวจสอบและทำความสะอาดข้อมูล"""

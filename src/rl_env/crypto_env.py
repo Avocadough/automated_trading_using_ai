@@ -42,7 +42,7 @@ class CryptoTradingEnv(gym.Env):
         turnover_reward_coeff: float = 0.0,
         trade_threshold: float = 0.02,
         # ---- execution smoothing ----
-        deadband_frac: float = 0.25,  # ไม่ขยับถ้า |delta_notional|/equity < 25%
+        deadband_frac: float = 0.02,  # ไม่ขยับถ้า |delta_notional|/equity < 25%
         min_hold_steps: int = 2,     # ต้องถืออย่างน้อย 64 แท่งก่อนยอมเปลี่ยน
         cooldown_steps: int = 1,     # หลังเทรด คูลดาวน์อีก 16 แท่ง
     ):

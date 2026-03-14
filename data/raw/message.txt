@@ -1,0 +1,205 @@
+package com.example.lab7dialoglazycolumn
+
+import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.lab7dialoglazycolumn.ui.theme.Lab7DialogLazyColumnTheme
+
+data class Member(
+    val name: String,
+    val gender: String,
+    val email: String,
+    val salary: Int
+)
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            Lab7DialogLazyColumnTheme {
+                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                    MyScreen(modifier = Modifier.padding(innerPadding))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MyScreen(modifier: Modifier = Modifier) {
+    val memberItemsList = remember { mutableStateListOf<Member>() }
+    val contextForToast = LocalContext.current
+
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+    var textFieldName by rememberSaveable { mutableStateOf("") }
+    var textFieldEmail by rememberSaveable { mutableStateOf("") }
+    var textFieldSalary by rememberSaveable { mutableStateOf("") }
+
+    // State สำหรับ Radio Button (Gender)
+    val genderOptions = listOf("Male", "Female", "Other")
+    var selectedGender by rememberSaveable { mutableStateOf("") }
+
+    var showDeleteDialog by rememberSaveable { mutableStateOf(false) }
+    var memberToDelete by remember { mutableStateOf<Member?>(null) }
+
+    Column(modifier = modifier.padding(all = 16.dp)) {
+        Spacer(modifier = Modifier.height(20.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Member Lists:",
+                fontSize = 25.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Button(onClick = {
+                textFieldName = ""
+                textFieldEmail = ""
+                textFieldSalary = ""
+                selectedGender = ""
+                showAddDialog = true
+            }) {
+                Text(text = "Add Member")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            itemsIndexed(items = memberItemsList) { index, item ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "Name: ${item.name}")
+                            Text(text = "Gender: ${item.gender}")
+                            Text(text = "E-mail: ${item.email}")
+                            Text(text = "Salary: ${item.salary}")
+                        }
+                        TextButton(
+                            onClick = {
+                                memberToDelete = item
+                                showDeleteDialog = true
+                            }
+                        ) {
+                            Text(text = "Delete", color = Color.Red)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    if (showAddDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text(text = "Enter Information") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = textFieldName,
+                        onValueChange = { textFieldName = it },
+                        label = { Text(text = "Name") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Text(text = "Gender :")
+
+                    genderOptions.forEach { text ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .selectable(
+                                    selected = (text == selectedGender),
+                                    onClick = { selectedGender = text }
+                                ),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = (text == selectedGender),
+                                onClick = { selectedGender = text }
+                            )
+                            Text(text = text, modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = textFieldEmail,
+                        onValueChange = { textFieldEmail = it },
+                        label = { Text(text = "E-mail") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = textFieldSalary,
+                        onValueChange = { textFieldSalary = it },
+                        label = { Text(text = "Salary") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val salaryInt = textFieldSalary.toIntOrNull() ?: 0
+                        if (textFieldName.isNotEmpty() && selectedGender.isNotEmpty() && textFieldEmail.isNotEmpty()) {
+                            memberItemsList.add(Member(textFieldName, selectedGender, textFieldEmail, salaryInt))
+                            showAddDialog = false
+                        } else {
+                            Toast.makeText(contextForToast, "Please fill all fields", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) { Text(text = "Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDialog = false }) { Text(text = "Cancel") }
+            }
+        )
+    }
+
+    if (showDeleteDialog && memberToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text(text = "Warning") },
+            text = { Text(text = "Are you sure you want to delete ${memberToDelete?.name}?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        memberItemsList.remove(memberToDelete)
+                        showDeleteDialog = false
+                        memberToDelete = null
+                    }
+                ) { Text(text = "Yes", color = Color.Red) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) { Text(text = "No") }
+            }
+        )
+    }
+}

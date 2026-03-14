@@ -20,9 +20,13 @@ except ImportError:
 
 # --- GA Search Space (ไม่แตะสูตรฟีเจอร์) ---
 N_SET = np.array([13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597], dtype=np.int32)
+
 ALPHA_SET = np.array([1, 2, 3, 5, 8, 11], dtype=np.int32)
+
 BETA_SET = np.array([0.38, 0.5, 0.61, 1, 1.44, 1.61, 2.61], dtype=np.float32)
+
 D_SET = np.array([2, 3, 5, 8, 13], dtype=np.int32)
+
 SRC_SET = np.array([0, 1, 2], dtype=np.int32)  # 0=close, 1=hl2, 2=hlc3
 
 # --- Fast Rolling (GPU) ---
@@ -183,6 +187,9 @@ def calculate_fitness_batch_gpu(
     # โทษ no-trade
     shortfall = cp.maximum(0, (min_trades - trades_count))
     cash -= shortfall.astype(cp.float32) * no_trade_penalty
+    
+    trade_bonus_per_trade = 10.0 
+    cash += trades_count.astype(cp.float32) * trade_bonus_per_trade
 
     return cash
 
@@ -263,9 +270,9 @@ def run_genetic_algorithm_full_gpu(df, population_size=64, generations=12, mutat
         open_prices, high_prices, low_prices, close_prices, population,
         fee=0.0005,
         slippage=0.0002,
-        min_trades=max(5, int(close_prices.shape[0]) // 1200),  # แค่กันเงียบสนิทเบาๆ
-        no_trade_penalty=50.0,                                   # ลงโทษเบาๆ พอ
-        flat_penalty_per_step=0.0                                # ปิดไปเลย
+        min_trades=max(10, int(close_prices.shape[0]) // 200), 
+        no_trade_penalty=2500,                                 
+        flat_penalty_per_step=0.0                                
     )
         cp.cuda.runtime.deviceSynchronize()
 

@@ -11,6 +11,15 @@ from typing import Tuple, Dict
 import numpy as np
 import pandas as pd
 
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(PROJECT_ROOT)
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(PROJECT_ROOT)
+
+from src.utils import ensure_datetime_index
+
 # --- Search Spaces (คุณปรับได้) ---
 N_SET = [13, 21, 34, 55, 89, 144, 233]
 ALPHA_SET = [3, 5, 8, 13]
@@ -19,15 +28,7 @@ D_SET = [5, 8, 13, 21, 34]
 SRC_SET = ['close', 'hl2', 'hlc3']
 
 
-def _ensure_dtindex(df: pd.DataFrame) -> pd.DataFrame:
-    if isinstance(df.index, pd.DatetimeIndex):
-        return df.sort_index()
-    for c in ["timestamp", "time", "open_time", "date", "datetime"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], utc=True, errors="coerce")
-            df = df.set_index(c)
-            break
-    return df.sort_index()
+
 
 
 def create_features_with_params(df_original: pd.DataFrame, params: Tuple[int, int, int, float, str]) -> pd.DataFrame | None:
@@ -115,12 +116,19 @@ def _evaluate_individual(individual, df, memo):
 
 
 def run_ga(
-    df: pd.DataFrame,
+    df_path: str, # Changed to accept df_path
     population_size: int = 80,
     generations: int = 30,
     mutation_rate: float = 0.2,
     n_processes: int | None = None
 ):
+    # Load DataFrame inside run_ga
+    df = pd.read_parquet(df_path)
+    df = ensure_datetime_index(df)
+    needed = ["open", "high", "low", "close"]
+    if any(c not in df.columns for c in needed):
+        raise ValueError(f"Missing columns: {needed}")
+
     if n_processes is None:
         n_processes = max(1, cpu_count() - 1)
     print(f"[info] Using {n_processes} parallel workers")
@@ -136,10 +144,21 @@ def run_ga(
     best_params, best_score = None, -np.inf
 
     for gen in range(1, generations + 1):
-        with Pool(processes=n_processes) as pool:
-            eval_fn = partial(_evaluate_individual, df=df, memo=memo)
-            results = pool.map(eval_fn, population)
-
+        # Pre-filter to evaluate only unique and uncached individuals
+        unique_pop = list(set(population))
+        to_eval = [ind for ind in unique_pop if (ind[0], ind[1], ind[3], ind[2], ind[4]) not in memo]
+        
+        if to_eval:
+            with Pool(processes=n_processes) as pool:
+                eval_fn = partial(_evaluate_individual, df=df, memo={})
+                new_results = pool.map(eval_fn, to_eval)
+                
+            for p, score in new_results:
+                memo[p] = score
+                
+        # Retrieve scores for the entire population
+        results = [((ind[0], ind[1], ind[3], ind[2], ind[4]), memo[(ind[0], ind[1], ind[3], ind[2], ind[4])]) for ind in population]
+        
         # extract fitness
         fitness_scores = [score for _, score in results]
         # tournament selection
@@ -184,7 +203,7 @@ def main():
         raise FileNotFoundError(f"Raw parquet missing: {apath}")
 
     df = pd.read_parquet(apath)
-    df = _ensure_dtindex(df)
+    df = ensure_datetime_index(df)
     needed = ["open", "high", "low", "close"]
     if any(c not in df.columns for c in needed):
         raise ValueError(f"Missing columns: {needed}")

@@ -21,6 +21,10 @@ from stable_baselines3.common.callbacks import EvalCallback
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(PROJECT_ROOT)
 
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(PROJECT_ROOT)
+
 from src.rl_env.crypto_env import CryptoTradingEnv
 
 
@@ -83,9 +87,9 @@ def build_env(
     turnover_reward_coeff: float = 0.0,
     trade_threshold: float = 0.02,
     # ---- execution smoothing ----
-    deadband_frac: float = 0.25,
-    min_hold_steps: int = 64,
-    cooldown_steps: int = 16,
+    deadband_frac: float = 0.02,  
+    min_hold_steps: int = 2,    
+    cooldown_steps: int = 1,  
 ):
     def _make():
         common_kwargs = dict(
@@ -137,12 +141,20 @@ def main(
     turnover_reward_coeff: float = 0.05,
     trade_threshold: float = 0.01,
     deadband_frac: float = 0.10,
+    min_hold_steps: int = 64,  
+    cooldown_steps: int = 16,
 ):
     set_global_seeds(seed)
 
     print(f"[info] Loading features from: {features_path}")
     features, window_size, from_meta = load_meta_or_infer(features_path)
     print(f"[info] Using features={features} | window_size={window_size} | from_meta={from_meta}")
+
+    meta_path = Path(str(features_path).replace(".parquet", "_meta.json"))
+    if meta_path.exists():
+        meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta_data["train_split"] = train_split
+        meta_path.write_text(json.dumps(meta_data, indent=2), encoding="utf-8")
 
     df_all = pd.read_parquet(features_path)
     needed = ["close"] + features
@@ -194,24 +206,28 @@ def main(
 
     train_env = build_env(
         train_df, features, window_size,
-        initial_balance=10_000.0, taker_fee=0.0005, position_limit=0.30,
-        slippage_bps=0.0, reward_scale=100.0, normalize=True, action_mode="discrete",
-        # shaping – ปิดไว้ก่อน (กันบังคับเทรด)
-        flat_penalty_bps=0.0, inactivity_steps=256, inactivity_penalty_bps=0.0,
-        turnover_reward_coeff=0.0, trade_threshold=0.02,
-        # execution smoothing – “ยาที่แรงพอจะทำให้ ~200 ไม้”
-        deadband_frac=0.25,   # 25% ของ equity ต่อการเปลี่ยนพอร์ตถึงจะยอมขยับ
-        min_hold_steps=64,    # ต้องถือขั้นต่ำ 64 แท่ง
-        cooldown_steps=16,    # เทรดแล้วพัก 16 แท่ง
+        **common_env_kwargs,
+        min_hold_steps=min_hold_steps,
+        cooldown_steps=cooldown_steps, 
     )
 
     eval_env = build_env(
         eval_df, features, window_size,
-        initial_balance=10_000.0, taker_fee=0.0005, position_limit=0.30,
-        slippage_bps=0.0, reward_scale=100.0, normalize=True, action_mode="discrete",
-        flat_penalty_bps=0.0, inactivity_steps=256, inactivity_penalty_bps=0.0,
-        turnover_reward_coeff=0.0, trade_threshold=0.02,
-        deadband_frac=0.25, min_hold_steps=64, cooldown_steps=16,
+        initial_balance=10_000.0, 
+        taker_fee=0.0005, 
+        position_limit=0.30,
+        slippage_bps=0.0, 
+        reward_scale=100.0, 
+        normalize=True, 
+        action_mode="discrete",
+        flat_penalty_bps=0.0, 
+        inactivity_steps=inactivity_steps,
+        inactivity_penalty_bps=0.0,
+        turnover_reward_coeff=0.0,
+        trade_threshold=trade_threshold,
+        deadband_frac=deadband_frac, 
+        min_hold_steps=min_hold_steps,
+        cooldown_steps=cooldown_steps,
     )
 
 
@@ -312,4 +328,6 @@ if __name__ == "__main__":
         turnover_reward_coeff=args.turnover_reward_coeff,
         trade_threshold=args.trade_threshold,
         deadband_frac=args.deadband_frac,
+        min_hold_steps=args.min_hold_steps,
+        cooldown_steps=16
     )

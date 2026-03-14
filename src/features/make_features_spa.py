@@ -11,20 +11,15 @@ import pandas as pd
 import os, sys, json
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(PROJECT_ROOT)
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(PROJECT_ROOT)
+
 from src.spa.spa_core import SPAParams, run_spa
+from src.utils import ensure_datetime_index
 
 
-def ensure_dtindex(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure DataFrame is indexed by UTC DatetimeIndex, sorted ascending."""
-    if isinstance(df.index, pd.DatetimeIndex):
-        return df.sort_index()
-    for c in ["timestamp", "time", "open_time", "date", "datetime"]:
-        if c in df.columns:
-            df[c] = pd.to_datetime(df[c], utc=True, errors="coerce")
-            df = df.set_index(c)
-            break
-    df = df.sort_index()
-    return df
+
 
 
 def encode_signal(sig: pd.Series) -> pd.Series:
@@ -42,7 +37,8 @@ def make_features_spa(
     spa_alpha: float = 3.0,
     spa_gamma: float = 1.0,
     spa_m_ma: int = 5,
-    spa_source: str = "close"
+    spa_source: str = "close",
+    train_split: float = 0.8
 ):
     """
     Build RL-ready features that include SPA signals.
@@ -57,7 +53,7 @@ def make_features_spa(
 
     print(f"[info] Loading raw klines: {input_parquet}")
     df = pd.read_parquet(input_parquet)
-    df = ensure_dtindex(df)
+    df = ensure_datetime_index(df)
 
     required = {"high", "low", "close"}
     missing = [c for c in required if c not in df.columns]
@@ -114,9 +110,16 @@ def make_features_spa(
     out.to_parquet(output_parquet, compression="snappy")
 
     # Save meta
+    inferred_freq = pd.infer_freq(out.index) or "unknown"
+    FREQ_TO_PERIODS = {"1min": 525600, "5min": 105120, "15min": 35040, "1H": 8760, "4H": 2190, "1D": 365}
+    periods_per_year = FREQ_TO_PERIODS.get(inferred_freq, 35040)  # default 15m
+
     meta = {
         "features": features,
         "window_size": int(window_size_meta),
+        "freq_hint": inferred_freq,
+        "periods_per_year": periods_per_year,
+        "train_split": train_split,
         "rows": int(len(out)),
         "source": str(input_parquet),
         "spa_params": {
@@ -136,8 +139,8 @@ def make_features_spa(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Build SPA-based RL features")
-    ap.add_argument("--input", type=str, default="data/raw/btc_1h.parquet")
-    ap.add_argument("--output", type=str, default="data/features/btc_1h_spa.parquet")
+    ap.add_argument("--input", type=str, default="data/raw/btc_15m.parquet")
+    ap.add_argument("--output", type=str, default="data/features/btc_15m_spa.parquet")
     ap.add_argument("--window_size_meta", type=int, default=64)
 
     # SPA params
@@ -146,6 +149,7 @@ if __name__ == "__main__":
     ap.add_argument("--spa_gamma", type=float, default=1.0)
     ap.add_argument("--spa_m_ma", type=int, default=5)
     ap.add_argument("--spa_source", type=str, default="close", choices=["close", "hl2", "hlc3"])
+    ap.add_argument("--train_split", type=float, default=0.8)
 
     args = ap.parse_args()
 
@@ -157,5 +161,6 @@ if __name__ == "__main__":
         spa_alpha=args.spa_alpha,
         spa_gamma=args.spa_gamma,
         spa_m_ma=args.spa_m_ma,
-        spa_source=args.spa_source
+        spa_source=args.spa_source,
+        train_split=args.train_split
     )

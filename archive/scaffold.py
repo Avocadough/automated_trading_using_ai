@@ -38,9 +38,7 @@ def main():
         "reports/tables",
         "src/backtest",
         "src/dashboard",
-        "src/data_ingest",
-        "src/feature_engineering",
-        "src/paper_trade",
+        "src/features",
         "src/rl_env",
         "src/train",
         "src/utils",
@@ -86,8 +84,8 @@ def download(symbol: str, interval: str = "1h", limit: int = 1000):
     # TODO: ใส่โค้ดดึงราคาจริง (เช่น ccxt/requests)
     print(f"Downloading klines for {symbol} @ {interval}, limit={limit} (TODO)")
 """,
-        "src/feature_engineering/__init__.py": "",
-        "src/feature_engineering/make_features.py": """\
+        "src/features/__init__.py": "",
+        "src/features/make_features.py": """\
 \"\"\"Feature engineering stub.\"\"\"
 
 def make_features():

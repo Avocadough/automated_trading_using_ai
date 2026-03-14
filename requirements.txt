@@ -4,7 +4,7 @@ numpy==1.23.5
 pyarrow==16.1.0
 
 #--extra-index-url https://download.pytorch.org/whl/cu128
-#torch==2.7.0+cu128 แนะนำติดตั้ง pytorch แยกเอาเองดีกว่าแม่งเรื่องมาก
+torch>=2.0.0
 
 stable-baselines3==2.3.2
 gymnasium==0.29.1

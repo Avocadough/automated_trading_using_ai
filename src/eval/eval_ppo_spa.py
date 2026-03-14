@@ -14,6 +14,10 @@ from stable_baselines3 import PPO
 import os, sys
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(PROJECT_ROOT)
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(PROJECT_ROOT)
+
 from src.rl_env.crypto_env import CryptoTradingEnv
 
 
@@ -27,9 +31,11 @@ def load_meta(features_path: Path):
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     features = meta.get("features")
     window_size = int(meta.get("window_size", 64))
+    train_split = float(meta.get("train_split", 0.8))
+    periods_per_year = int(meta.get("periods_per_year", 35040))
     if not features or not isinstance(features, list):
         raise ValueError("Invalid meta: 'features' ต้องเป็น list และต้องไม่ว่าง")
-    return features, window_size
+    return features, window_size, train_split, periods_per_year
 
 
 def build_env(df: pd.DataFrame, features: list[str], window_size: int):
@@ -48,10 +54,10 @@ def build_env(df: pd.DataFrame, features: list[str], window_size: int):
         deadband_frac=0.02,
         min_hold_steps=2,
         # --- keep shaping OFF in eval ---
-        flat_penalty_bps=0.01,
+        flat_penalty_bps=0.0,
         inactivity_steps=256,
-        inactivity_penalty_bps=0.01,
-        turnover_reward_coeff=0.02,
+        inactivity_penalty_bps=0.0,
+        turnover_reward_coeff=0.0,
         trade_threshold=0.1,
     )
 
@@ -65,14 +71,13 @@ def compute_max_drawdown(equity: np.ndarray) -> float:
     return float(dd.min()) if len(dd) else 0.0
 
 
-def run_eval(model_path: Path, features_path: Path, train_split: float,
-             periods_per_year: int, out_csv: Path):
+def run_eval(model_path: Path, features_path: Path, out_csv: Path):
     print(f"[info] Loading model: {model_path}")
     model = PPO.load(model_path, device="cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"[info] Loading features: {features_path}")
     # ✅ enforce meta to match training setup
-    features, window_size = load_meta(features_path)
+    features, window_size, train_split, periods_per_year = load_meta(features_path)
     df_all = pd.read_parquet(features_path)
     need_cols = ["close"] + features
     missing = [c for c in need_cols if c not in df_all.columns]
@@ -235,26 +240,21 @@ def run_eval(model_path: Path, features_path: Path, train_split: float,
 def main(
     model_path: Path = Path("data/models/_eval_spa/best_model.zip"),
     features_path: Path = Path("data/features/btc_15m_rl_features_split_validated.parquet"),
-    train_split: float = 0.7,
-    periods_per_year: int = 70000,
     out_csv: Path = Path("data/eval/ppo_spa_btc_15m_eval_best.csv"),
 ):
-    run_eval(model_path, features_path, train_split, periods_per_year, out_csv)
+    run_eval(model_path, features_path, out_csv)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Evaluate PPO SPA model on held-out data (uses *_meta.json)")
     ap.add_argument("--model", type=str, default="data/models/_eval_spa/best_model.zip")
+    ap.add_argument("--train_split", type=float, default=0.8)
     ap.add_argument("--features", type=str, default="data/features/btc_15m_rl_features_split_validated.parquet")
-    ap.add_argument("--train_split", type=float, default=0.7)
-    ap.add_argument("--periods_per_year", type=int, default=70000)
     ap.add_argument("--out_csv", type=str, default="data/eval/ppo_spa_btc_15m_eval_best.csv")
     args = ap.parse_args()
 
     main(
         model_path=Path(args.model),
         features_path=Path(args.features),
-        train_split=args.train_split,
-        periods_per_year=args.periods_per_year,
         out_csv=Path(args.out_csv),
     )

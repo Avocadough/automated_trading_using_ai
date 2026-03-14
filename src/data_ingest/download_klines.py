@@ -84,12 +84,12 @@ def download_futures_klines(pair, start_str, end_str, interval, output_path):
     v = final_df['volume'].resample(freq).sum()
 
     out = pd.DataFrame({
-        'open': o.ffill(),
-        'high': h.ffill(),
-        'low': l.ffill(),
+        'open': o,
+        'high': h,
+        'low': l,
         'close': c.ffill(),
         'volume': v.fillna(0)
-    })
+    }).dropna(subset=['open', 'high', 'low'])
 
     out.to_parquet(output_path)
     print(f"Successfully saved {len(out)} rows to {output_path}")
