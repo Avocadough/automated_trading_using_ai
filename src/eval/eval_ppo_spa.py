@@ -192,9 +192,13 @@ def run_eval(model_path: Path, features_path: Path, out_csv: Path):
 
     # trade stats
     n_trades = len(trades)
-    wins = [t for t in trades if t["return"] > 0]
-    losses = [t for t in trades if t["return"] < 0]
-    winrate = (len(wins) / n_trades) if n_trades > 0 else 0.0
+    wins = [t for t in trades if t["return"] > 1e-12]
+    losses = [t for t in trades if t["return"] < -1e-12]
+    breakevens = [t for t in trades if -1e-12 <= t["return"] <= 1e-12]
+    
+    # Winrate only out of trades that actually won or lost (exclude exact 0)
+    resolved_trades = len(wins) + len(losses)
+    winrate = (len(wins) / resolved_trades) if resolved_trades > 0 else 0.0
     avg_win = np.mean([t["return"] for t in wins]) if wins else 0.0
     avg_loss = np.mean([t["return"] for t in losses]) if losses else 0.0
     avg_rr = (avg_win / abs(avg_loss)) if losses and abs(avg_loss) > 1e-12 else np.nan
@@ -240,9 +244,9 @@ def run_eval(model_path: Path, features_path: Path, out_csv: Path):
 
     print(f"\n--- Trade Stats ---")
     print(f"Trades      : {n_trades}")
-    print(f"  Wins      : {len(wins)}  ({winrate*100:.2f}%)")
+    print(f"  Wins      : {len(wins)}  ({winrate*100:.2f}% of resolved)")
     print(f"  Losses    : {len(losses)}")
-    print(f"  Breakeven : {n_trades - len(wins) - len(losses)}")
+    print(f"  Breakeven : {len(breakevens)}")
     print(f"Avg Win     : {avg_win*100:.3f}%" if wins else "Avg Win     : n/a")
     print(f"Avg Loss    : {avg_loss*100:.3f}%" if losses else "Avg Loss    : n/a")
     print(f"Avg R/R     : {avg_rr:.2f}" if not np.isnan(avg_rr) else "Avg R/R     : n/a")

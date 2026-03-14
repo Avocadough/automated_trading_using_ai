@@ -180,6 +180,7 @@ class CryptoTradingEnv(gym.Env):
         self.last_trade_price = float(self.df.loc[self.current_step, "close"])
         obs = self._build_obs()
         info = {"equity": self.equity, "position_frac": 0.0}
+        self.last_close = float(self.df.loc[self.current_step, "close"])
         return obs, info
 
     def step(self, action):
@@ -189,9 +190,11 @@ class CryptoTradingEnv(gym.Env):
         terminated = self.current_step >= len(self.df) - 1
         price = float(self.df.loc[self.current_step, "close"])
 
-        # equity before
-        unrealized = self.qty * (price - self.avg_entry)
-        equity_before = float(max(self.balance + unrealized, 1e-12))
+        # equity before (calculated at previous step's close price)
+        # Note: self.last_close is tracked from previous step
+        prev_price = getattr(self, "last_close", price)
+        unrealized_prev = self.qty * (prev_price - self.avg_entry)
+        equity_before = float(max(self.balance + unrealized_prev, 1e-12))
 
         # desired target from action
         target_frac = self._map_action_to_target_frac(action)
@@ -266,6 +269,7 @@ class CryptoTradingEnv(gym.Env):
 
         self.total_reward += reward
         self.equity = equity_after
+        self.last_close = price
 
         obs = self._build_obs()
         info = {
