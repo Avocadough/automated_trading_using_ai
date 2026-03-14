@@ -7,8 +7,8 @@ class AdvancedCryptoTradingEnv(gym.Env):
     metadata = {'render_modes': ['human']}
 
     def __init__(self, df, window_size=64, initial_balance=1000, 
-                  taker_fee=0.0005, position_limit=0.9, 
-                  sharpe_ratio_window=100): # เพิ่ม parameter ใหม่ๆ
+                taker_fee=0.0005, position_limit=0.9, 
+                sharpe_ratio_window=100): # เพิ่ม parameter ใหม่ๆ
         super(AdvancedCryptoTradingEnv, self).__init__()
 
         self.df = df.dropna().reset_index(drop=True)

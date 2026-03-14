@@ -434,7 +434,7 @@ def write_meta_alongside_parquet(
 
 # --- Main ---
 if __name__ == "__main__":
-    input_file = Path("data/raw/btc_15m.parquet")
+    input_file = Path("data/raw/btc_5m_2020_2026.parquet")
     df_raw = pd.read_parquet(input_file)
 
     # ✂️ Split 60/20/20 (คงลำดับเวลา)
@@ -485,7 +485,7 @@ if __name__ == "__main__":
     print("\n✅ Feature preview:")
     print(final_df_for_rl[['open','close','upper_band_H','lower_band_L','strat_position']].tail())
 
-    out_path = Path("data/features/btc_15m_rl_features_split_validated.parquet")
+    out_path = Path("data/features/btc_m5_rl_features_split_validated.parquet")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     final_df_for_rl.to_parquet(out_path)
     print(f"\n💾 Saved to: {out_path}")

@@ -99,8 +99,8 @@ if __name__ == "__main__":
     parser.add_argument("--pair", type=str, default="BTCUSDT", help="Trading pair symbol (e.g., BTCUSDT)")
     parser.add_argument("--start", type=str, required=True, help="Start date in YYYY-MM-DD format")
     parser.add_argument("--end", type=str, required=True, help="End date in YYYY-MM-DD format")
-    parser.add_argument("--interval", type=str, default="15m", help="Kline interval (e.g., 1m, 5m, 15m, 1h)")
-    parser.add_argument("--output", type=str, default="data/raw/btc_15m.parquet", help="Output file path")
+    parser.add_argument("--interval", type=str, default="m5", help="Kline interval (e.g., 1m, 5m, 15m, 1h)")
+    parser.add_argument("--output", type=str, default="data/raw/btc_5m.parquet", help="Output file path")
     args = parser.parse_args()
 
     download_futures_klines(args.pair, args.start, args.end, args.interval, Path(args.output))

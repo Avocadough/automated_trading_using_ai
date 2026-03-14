@@ -37,7 +37,7 @@ def encode_signal(sig: pd.Series) -> pd.Series:
 def make_features_spa(
     input_parquet: Path,
     output_parquet: Path,
-    window_size_meta: int = 64,
+    window_size_meta: int = 288,
     spa_d: int = 89,
     spa_alpha: float = 3.0,
     spa_gamma: float = 1.0,
@@ -136,9 +136,9 @@ def make_features_spa(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Build SPA-based RL features")
-    ap.add_argument("--input", type=str, default="data/raw/btc_1h.parquet")
-    ap.add_argument("--output", type=str, default="data/features/btc_1h_spa.parquet")
-    ap.add_argument("--window_size_meta", type=int, default=64)
+    ap.add_argument("--input", type=str, default="data/raw/btc_5m_2020_2026.parquet")
+    ap.add_argument("--output", type=str, default="data/features/btc_5m_spa_v2.parquet")
+    ap.add_argument("--window_size_meta", type=int, default=288)
 
     # SPA params
     ap.add_argument("--spa_d", type=int, default=89)
