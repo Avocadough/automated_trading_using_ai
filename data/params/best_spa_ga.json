@@ -1,0 +1,8 @@
+{
+  "n": 21,
+  "alpha": 5,
+  "d": 21,
+  "beta": 0.61,
+  "src": "hlc3",
+  "fitness_final_capital": 100000.0
+}

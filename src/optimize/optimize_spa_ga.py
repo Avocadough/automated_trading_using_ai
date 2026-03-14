@@ -198,18 +198,12 @@ def run_ga(
 
 
 def main():
-    apath = Path("data/raw/btc_1h.parquet")
+    apath = Path("data/raw/btc_15m.parquet")
     if not apath.exists():
         raise FileNotFoundError(f"Raw parquet missing: {apath}")
 
-    df = pd.read_parquet(apath)
-    df = ensure_datetime_index(df)
-    needed = ["open", "high", "low", "close"]
-    if any(c not in df.columns for c in needed):
-        raise ValueError(f"Missing columns: {needed}")
-
     print("[info] Running GA optimization...")
-    best_params, best_score = run_ga(df, population_size=80, generations=30, mutation_rate=0.2)
+    best_params, best_score = run_ga(str(apath), population_size=80, generations=30, mutation_rate=0.2)
 
     out_dir = Path("data/params"); out_dir.mkdir(parents=True, exist_ok=True)
     out_json = out_dir / "best_spa_ga.json"

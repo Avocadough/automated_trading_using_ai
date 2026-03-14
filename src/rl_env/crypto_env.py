@@ -248,7 +248,7 @@ class CryptoTradingEnv(gym.Env):
         unrealized_after = self.qty * (price - self.avg_entry)
         equity_after = float(self.balance + unrealized_after)
 
-        # base reward
+        # base reward — ใช้ equity_before (ราคา ณ ต้นแท่งนี้) เป็น baseline
         step_ret = (equity_after / equity_before) - 1.0
         reward = self.reward_scale * step_ret
 

@@ -14,5 +14,6 @@
     "src": "hl2"
   },
   "n_rows": 70033,
-  "created_from": "data\\raw\\btc_15m.parquet"
+  "created_from": "data\\raw\\btc_15m.parquet",
+  "train_split": 0.8
 }

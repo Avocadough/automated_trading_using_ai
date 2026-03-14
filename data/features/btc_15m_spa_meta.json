@@ -2,19 +2,22 @@
   "features": [
     "log_ret_1",
     "rolling_std_20",
+    "RSI_14",
+    "BB_position",
+    "MACD_hist",
     "spa_sig_num"
   ],
   "window_size": 64,
-  "freq_hint": "15min",
+  "freq_hint": "unknown",
   "periods_per_year": 35040,
   "train_split": 0.8,
-  "rows": 105196,
+  "rows": 105195,
   "source": "data\\raw\\btc_15m.parquet",
   "spa_params": {
-    "d": 89,
-    "alpha": 3.0,
-    "gamma": 1.0,
+    "d": 21,
+    "alpha": 5,
+    "gamma": 0.61,
     "m_ma": 5,
-    "source": "close"
+    "source": "hlc3"
   }
 }

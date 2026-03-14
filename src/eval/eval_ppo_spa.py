@@ -44,21 +44,21 @@ def build_env(df: pd.DataFrame, features: list[str], window_size: int):
         features=features,
         window_size=window_size,
         initial_balance=10_000.0,
-        taker_fee=0.0005,
+        taker_fee=0.001,         # ตรงกับ train env
         position_limit=0.5,
-        slippage_bps=0.0,
+        slippage_bps=2.0,        # ตรงกับ train env
         reward_scale=100.0,
         normalize=True,
         action_mode="discrete",
-        # --- execution smoothing for eval ---
-        deadband_frac=0.02,
-        min_hold_steps=2,
+        deadband_frac=0.05,      # ตรงกับ train env
+        min_hold_steps=0,        # ปิด: ดู policy จริง
+        cooldown_steps=0,
         # --- keep shaping OFF in eval ---
         flat_penalty_bps=0.0,
         inactivity_steps=256,
         inactivity_penalty_bps=0.0,
         turnover_reward_coeff=0.0,
-        trade_threshold=0.1,
+        trade_threshold=0.01,
     )
 
 
@@ -223,13 +223,28 @@ def run_eval(model_path: Path, features_path: Path, out_csv: Path):
         ]).to_csv(trades_csv, index=False)
 
     # --- print summary ---
+    n_short = actions_taken.count(0)
+    n_flat  = actions_taken.count(1)
+    n_long  = actions_taken.count(2)
+    total_actions = len(actions_taken)
+
     print("\n=== EVAL SUMMARY ===")
     print(f"Total return: {total_return*100:.2f}%")
     print(f"Sharpe      : {sharpe:.2f}")
     print(f"Max DD      : {max_dd*100:.2f}%")
 
-    print(f"\nTrades      : {n_trades}")
-    print(f"Winrate     : {winrate*100:.2f}%")
+    print(f"\n--- Action Distribution (ดูว่า model เรียนรู้อะไร) ---")
+    print(f"Short (0)   : {n_short:,}  ({n_short/max(1,total_actions)*100:.1f}%)")
+    print(f"Flat  (1)   : {n_flat:,}  ({n_flat/max(1,total_actions)*100:.1f}%)")
+    print(f"Long  (2)   : {n_long:,}  ({n_long/max(1,total_actions)*100:.1f}%)")
+
+    print(f"\n--- Trade Stats ---")
+    print(f"Trades      : {n_trades}")
+    print(f"  Wins      : {len(wins)}  ({winrate*100:.2f}%)")
+    print(f"  Losses    : {len(losses)}")
+    print(f"  Breakeven : {n_trades - len(wins) - len(losses)}")
+    print(f"Avg Win     : {avg_win*100:.3f}%" if wins else "Avg Win     : n/a")
+    print(f"Avg Loss    : {avg_loss*100:.3f}%" if losses else "Avg Loss    : n/a")
     print(f"Avg R/R     : {avg_rr:.2f}" if not np.isnan(avg_rr) else "Avg R/R     : n/a")
     print(f"Avg duration: {avg_dur_steps:.1f} steps  (~{avg_dur_hours:.2f} hours)")
 
@@ -238,19 +253,19 @@ def run_eval(model_path: Path, features_path: Path, out_csv: Path):
 
 
 def main(
-    model_path: Path = Path("data/models/_eval_spa/best_model.zip"),
-    features_path: Path = Path("data/features/btc_15m_rl_features_split_validated.parquet"),
-    out_csv: Path = Path("data/eval/ppo_spa_btc_15m_eval_best.csv"),
+    model_path: Path = Path("data/models/ppo_spa_btc_15m.zip"),
+    features_path: Path = Path("data/features/btc_15m_spa.parquet"),
+    out_csv: Path = Path("data/eval/ppo_spa_btc_15m_eval.csv"),
 ):
     run_eval(model_path, features_path, out_csv)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Evaluate PPO SPA model on held-out data (uses *_meta.json)")
-    ap.add_argument("--model", type=str, default="data/models/_eval_spa/best_model.zip")
+    ap.add_argument("--model", type=str, default="data/models/ppo_spa_btc_15m.zip")
     ap.add_argument("--train_split", type=float, default=0.8)
-    ap.add_argument("--features", type=str, default="data/features/btc_15m_rl_features_split_validated.parquet")
-    ap.add_argument("--out_csv", type=str, default="data/eval/ppo_spa_btc_15m_eval_best.csv")
+    ap.add_argument("--features", type=str, default="data/features/btc_15m_spa.parquet")
+    ap.add_argument("--out_csv", type=str, default="data/eval/ppo_spa_btc_15m_eval.csv")
     args = ap.parse_args()
 
     main(
