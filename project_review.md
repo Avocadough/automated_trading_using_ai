@@ -1,6 +1,6 @@
 # Project Review: `automated_trading_using_ai`
 
-> **Last Updated:** 2026-03-20 | **Status:** 🏰 Institutional / Thesis-Ready
+> **Last Updated:** 2026-03-20 | **Status:** 🏰 Institutional / Thesis-Ready / thanos
 
 ## 1. System Architecture
 
