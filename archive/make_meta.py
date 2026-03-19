@@ -2,7 +2,7 @@
 import pandas as pd, json, sys
 from pathlib import Path
 
-parquet_path = Path("data/features/btc_15m_spa.parquet")  # <-- แก้ชื่อไฟล์ถ้าไม่ตรง
+parquet_path = Path("data/features/btc_1h_spa.parquet")  # <-- แก้ชื่อไฟล์ถ้าไม่ตรง
 df = pd.read_parquet(parquet_path)
 
 # เลือกทุกคอลัมน์เป็นฟีเจอร์ ยกเว้น 'open','close' (ปรับได้ตามที่ต้องการ)

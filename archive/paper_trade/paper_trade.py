@@ -89,9 +89,9 @@ def run_loop(model_path: str, pair: str, interval: str, duration_hours: float):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser("Dummy Testnet Paper Trading Loop")
-    ap.add_argument("--model", type=str, default="data/models/ppo_spa_btc_15m.zip")
+    ap.add_argument("--model", type=str, default="data/models/ppo_spa_btc_1h.zip")
     ap.add_argument("--pair", type=str, default="BTCUSDT")
-    ap.add_argument("--interval", type=str, default="15m")
+    ap.add_argument("--interval", type=str, default="1h")
     ap.add_argument("--duration_hours", type=float, default=1.0)
     args = ap.parse_args()
     

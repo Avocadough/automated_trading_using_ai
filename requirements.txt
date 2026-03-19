@@ -1,6 +1,6 @@
 # Core Data & ML Libraries
 pandas==2.2.2
-numpy==1.23.5
+numpy==2.2.6
 pyarrow==16.1.0
 
 #--extra-index-url https://download.pytorch.org/whl/cu128
@@ -11,8 +11,14 @@ gymnasium==0.29.1
 
 # Binance API & Backtesting
 python-binance==1.0.19
+ccxt>=4.0.0
 vectorbt==0.26.2
 plotly==5.15.0
+
+# Visualization & Statistics
+matplotlib>=3.8.0
+seaborn>=0.13.0
+scipy>=1.12.0
 
 # Dashboard
 streamlit==1.35.0

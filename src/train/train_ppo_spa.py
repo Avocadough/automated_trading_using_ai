@@ -16,16 +16,25 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import EvalCallback
+from typing import Callable
 
-# project root so we can import env
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.append(PROJECT_ROOT)
+def linear_schedule(initial_value: float) -> Callable[[float], float]:
+    """
+    Linear learning rate schedule.
+    :param initial_value: Initial learning rate.
+    :return: schedule that computes current learning rate depending on remaining progress
+    """
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
 
-import sys, os
+    return func
+
+# project root
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(PROJECT_ROOT)
 
 from src.rl_env.crypto_env import CryptoTradingEnv
+from src.models.custom_policy import get_policy_kwargs
 
 
 def set_global_seeds(seed: int):
@@ -34,7 +43,6 @@ def set_global_seeds(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    # คุม deterministic ให้มากขึ้น
     try:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -43,11 +51,6 @@ def set_global_seeds(seed: int):
 
 
 def load_meta_or_infer(features_path: Path):
-    """
-    พยายามโหลด <features> และ <window_size> จากไฟล์ *_meta.json
-    ถ้าไม่มี meta: เดา features = คอลัมน์ทั้งหมดที่ไม่ใช่ 'close'
-    และตั้ง window_size = 64
-    """
     meta_path = Path(str(features_path).replace(".parquet", "_meta.json"))
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -55,47 +58,52 @@ def load_meta_or_infer(features_path: Path):
         window_size = int(meta.get("window_size", 64))
         if not features or not isinstance(features, list):
             raise ValueError("Invalid meta: 'features' must be a non-empty list.")
-        return features, window_size, True  # loaded_from_meta
-    # fallback: infer
+        return features, window_size, True
     df_tmp = pd.read_parquet(features_path, columns=None)
     all_cols = list(df_tmp.columns)
     if "close" not in all_cols:
         raise ValueError("Parquet must contain 'close' column.")
     inferred = [c for c in all_cols if c != "close"]
     if not inferred:
-        raise ValueError("No feature columns were found to infer (only 'close' present).")
-    return inferred, 64, False  # not from meta
+        raise ValueError("No feature columns found (only 'close' present).")
+    return inferred, 64, False
 
 
-# ==== แทนที่ฟังก์ชัน build_env ทั้งก้อนใน src/train/train_ppo_spa.py ====
 def build_env(
     df: pd.DataFrame,
     features: list[str],
     window_size: int,
     *,
+    norm_mu=None,
+    norm_std=None,
     initial_balance: float = 10_000.0,
     taker_fee: float = 0.0005,
     position_limit: float = 0.30,
-    slippage_bps: float = 0.0,
-    reward_scale: float = 100.0,
+    slippage_bps: float = 0.5,
+    reward_scale: float = 10.0,
     normalize: bool = True,
     action_mode: str = "discrete",
-    # ---- shaping knobs (ตั้ง 0 เพื่อปิดได้) ----
     flat_penalty_bps: float = 0.0,
     inactivity_steps: int = 256,
     inactivity_penalty_bps: float = 0.0,
     turnover_reward_coeff: float = 0.0,
-    trade_threshold: float = 0.02,
-    # ---- execution smoothing ----
-    deadband_frac: float = 0.02,  
-    min_hold_steps: int = 2,    
-    cooldown_steps: int = 1,  
+    trade_threshold: float = 0.01,
+    deadband_frac: float = 0.02,
+    min_hold_steps: int = 0,
+    cooldown_steps: int = 0,
+    reward_clip: float = 5.0,
+    drawdown_penalty_coeff: float = 0.5,
+    liquidation_threshold: float = 0.5,
+    sharpe_window: int = 48,
+    sharpe_eta: float = 0.01,
 ):
     def _make():
         common_kwargs = dict(
             df=df,
             features=features,
             window_size=window_size,
+            norm_mu=norm_mu,
+            norm_std=norm_std,
             initial_balance=initial_balance,
             taker_fee=taker_fee,
             position_limit=position_limit,
@@ -103,18 +111,16 @@ def build_env(
             reward_scale=reward_scale,
             normalize=normalize,
             action_mode=action_mode,
-            # shaping
             flat_penalty_bps=flat_penalty_bps,
             inactivity_steps=inactivity_steps,
             inactivity_penalty_bps=inactivity_penalty_bps,
             turnover_reward_coeff=turnover_reward_coeff,
             trade_threshold=trade_threshold,
-            # smoothing
             deadband_frac=deadband_frac,
             min_hold_steps=min_hold_steps,
             cooldown_steps=cooldown_steps,
+            reward_clip=reward_clip,
         )
-        # ส่งเฉพาะ args ที่ __init__ ของ Env รองรับ
         env_sig = inspect.signature(CryptoTradingEnv.__init__).parameters
         allowed = {k: v for k, v in common_kwargs.items() if k in env_sig}
         return CryptoTradingEnv(**allowed)
@@ -124,32 +130,31 @@ def build_env(
     return env
 
 
-
-
 def main(
     features_path: Path,
     output_prefix: Path,
-    timesteps: int = 300_000,
+    timesteps: int = 3_000_000,
     seed: int = 42,
-    eval_every_steps: int = 10_000,
+    eval_every_steps: int = 50_000,
     train_split: float = 0.8,
     device_arg: str | None = None,
-    # ---- CLI-exposed shaping knobs ----
+    # ---- shaping knobs ----
     flat_penalty_bps: float = 0.0,
-    inactivity_steps: int = 128,
-    inactivity_penalty_bps: float = 0.0,
+    inactivity_steps: int = 256,
+    inactivity_penalty_bps: float = 1.0,
     turnover_reward_coeff: float = 0.0,
     trade_threshold: float = 0.01,
-    deadband_frac: float = 0.10,
-    min_hold_steps: int = 64,  
-    cooldown_steps: int = 16,
+    deadband_frac: float = 0.05,
+    min_hold_steps: int = 0,
+    cooldown_steps: int = 3,
 ):
     set_global_seeds(seed)
 
     print(f"[info] Loading features from: {features_path}")
     features, window_size, from_meta = load_meta_or_infer(features_path)
-    print(f"[info] Using features={features} | window_size={window_size} | from_meta={from_meta}")
+    print(f"[info] Features: {len(features)} | window_size={window_size} | from_meta={from_meta}")
 
+    # Update train_split in meta
     meta_path = Path(str(features_path).replace(".parquet", "_meta.json"))
     if meta_path.exists():
         meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -162,75 +167,81 @@ def main(
     if missing:
         raise ValueError(f"Missing columns in features parquet: {missing}")
 
-    # clean
     df_all = df_all[needed].dropna().reset_index(drop=True)
 
-    # ต้องให้ยาวกว่า window_size + อย่างน้อย 100 step เพื่อเกิดสัญญาณ/เรียนรู้
     if len(df_all) < window_size + 100:
         raise ValueError(
             f"Dataset too small ({len(df_all)}) for window_size={window_size}. "
             f"Need at least {window_size+100} rows."
         )
 
-    # split
+    # Split
     n_train = max(window_size + 1, int(len(df_all) * train_split))
-    n_train = min(n_train, len(df_all) - max(window_size + 1, 100))  # กัน eval ว่าง
+    n_train = min(n_train, len(df_all) - max(window_size + 1, 100))
     train_df = df_all.iloc[:n_train].copy()
-    eval_df = df_all.iloc[n_train:].copy()
+    eval_df  = df_all.iloc[n_train:].copy()
 
     if len(eval_df) < window_size + 1:
-        # ถ้า eval สั้นเกินไป ให้ย้าย boundary ลงมาอีกเล็กน้อย
         shift = (window_size + 1) - len(eval_df)
         n_train = max(window_size + 1, n_train - shift)
         train_df = df_all.iloc[:n_train].copy()
-        eval_df = df_all.iloc[n_train:].copy()
+        eval_df  = df_all.iloc[n_train:].copy()
 
-    print(f"[info] Dataset rows: total={len(df_all):,} | train={len(train_df):,} | eval={len(eval_df):,}")
+    print(f"[info] Dataset: total={len(df_all):,} | train={len(train_df):,} | eval={len(eval_df):,}")
 
-    # Build envs
+    # ====================================================================
+    # Compute normalization stats from TRAINING DATA ONLY
+    # Pass to eval env to prevent data leak
+    # ====================================================================
+    feat_df_train = train_df[features].astype("float64")
+    norm_mu  = feat_df_train.mean()
+    norm_std = feat_df_train.std().replace(0, 1.0)
+    print(f"[info] Computed norm stats from training data ({len(train_df):,} rows)")
+
+    # Common env kwargs (shared between train and eval, except shaping)
     common_env_kwargs = dict(
         initial_balance=10_000.0,
-        taker_fee=0.0005,        # 0.05% per side (Binance Futures taker fee)
-        position_limit=0.50,
-        slippage_bps=0.5,        # Realistic BTC slippage
-        reward_scale=100.0,
+        taker_fee=0.0005,
+        position_limit=0.30,
+        slippage_bps=0.5,
+        reward_scale=10.0,
+        reward_clip=5.0,
         normalize=True,
         action_mode="discrete",
+        trade_threshold=trade_threshold,
+        deadband_frac=deadband_frac,
+        liquidation_threshold=0.5,
+        sharpe_window=48,
+        sharpe_eta=0.01,
+    )
+
+    # Train env: uses shaping, computes its own norm stats (self-contained)
+    train_env = build_env(
+        train_df, features, window_size,
+        norm_mu=None, norm_std=None,
+        **common_env_kwargs,
         flat_penalty_bps=flat_penalty_bps,
         inactivity_steps=inactivity_steps,
         inactivity_penalty_bps=inactivity_penalty_bps,
         turnover_reward_coeff=turnover_reward_coeff,
-        trade_threshold=trade_threshold,
-        deadband_frac=deadband_frac,
+        min_hold_steps=min_hold_steps,
+        cooldown_steps=cooldown_steps,
+        drawdown_penalty_coeff=0.5,   # DD penalty ON in training
     )
 
-    train_env = build_env(
-        train_df, features, window_size,
-        **common_env_kwargs,
-        min_hold_steps=0,   # ปิด: ให้ fee signal สอน model เอง
-        cooldown_steps=0,   # ปิด: เช่นกัน
-    )
-
+    # Eval env: receives training norm stats → no future data leak
     eval_env = build_env(
         eval_df, features, window_size,
-        initial_balance=10_000.0,
-        taker_fee=0.0005,
-        position_limit=0.50,
-        slippage_bps=0.5,
-        reward_scale=100.0,
-        normalize=True,
-        action_mode="discrete",
+        norm_mu=norm_mu, norm_std=norm_std,
+        **common_env_kwargs,
         flat_penalty_bps=0.0,
         inactivity_steps=inactivity_steps,
         inactivity_penalty_bps=0.0,
         turnover_reward_coeff=0.0,
-        trade_threshold=trade_threshold,
-        deadband_frac=deadband_frac,
-        min_hold_steps=0,   # ปิด: ให้ policy แสดงพฤติกรรมจริง
+        min_hold_steps=0,
         cooldown_steps=0,
+        drawdown_penalty_coeff=0.0,   # DD penalty OFF in eval (pure equity)
     )
-
-
 
     # Device
     if device_arg is None or device_arg == "auto":
@@ -239,87 +250,91 @@ def main(
         device = device_arg
     print(f"[info] Device: {device}")
 
-    # Model + callbacks
+    # ====================================================================
+    # PPO Model — Sequence-Aware Architecture (CNN+LSTM)
+    # ====================================================================
+    # Custom feature extractor: Conv1D → LayerNorm → LSTM → Linear
+    # Replaces flat MLP which destroys temporal structure
+    custom_policy_kwargs = get_policy_kwargs(
+        features_dim=128,    # LSTM output → flat 128-dim feature vector
+        pi_layers=[128],     # Policy head: 128 → action logits
+        vf_layers=[128],     # Value head:  128 → scalar value
+    )
+
     model = PPO(
-        "MlpPolicy",
+        "MlpPolicy",          # SB3 base — custom extractor overrides feature processing
         train_env,
         verbose=1,
         device=device,
         seed=seed,
         tensorboard_log="./ppo_logs_spa/",
-        n_steps=4096,           # เพิ่มขึ้นใหญ่มาก สะสม data ให้เห็น cycle ตลาดชัดขึ้น
-        batch_size=512,         # batch ใหญ่ขึ้น ลด noise
+        # --- On-policy buffer ---
+        n_steps=2048,
+        batch_size=256,
         n_epochs=10,
-        learning_rate=1e-4,     # ช้าแต่ชัวร์
-        gamma=0.999,            # มองไกลขึ้น (0.999 = ~1000 steps = 10 วัน)
-        gae_lambda=0.98,
-        ent_coef=0.01,
+        # --- Learning rate (linear decay 3e-4 → 0) ---
+        learning_rate=linear_schedule(3e-4),
+        # --- Discount & GAE ---
+        gamma=0.995,           # ~200 steps lookahead = ~8 days @ 1H
+        gae_lambda=0.95,
+        # --- Policy gradient ---
+        ent_coef=0.02,         # slightly less than MLP (CNN+LSTM already expressive)
         clip_range=0.20,
         vf_coef=0.5,
         max_grad_norm=0.5,
-        policy_kwargs=dict(
-            net_arch=[dict(pi=[256, 256], vf=[256, 256])],  # network ใหญ่ขึ้น
-        ),
+        # --- CNN+LSTM policy ---
+        policy_kwargs=custom_policy_kwargs,
     )
 
     eval_dir = Path("data/models/_eval_spa")
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    # eval_every_steps ต้องน้อยกว่าจำนวน timesteps และอย่างน้อย 1
     eval_every_steps = max(1, min(eval_every_steps, max(1, timesteps // 2)))
     eval_cb = EvalCallback(
         eval_env,
         best_model_save_path=str(eval_dir),
         log_path=str(eval_dir),
         eval_freq=eval_every_steps,
-        n_eval_episodes=1,   # walk-forward one episode
+        n_eval_episodes=1,
         deterministic=True,
         render=False,
     )
 
-    print(f"[info] Training for {timesteps:,} timesteps... (eval every {eval_every_steps} steps)")
+    print(f"[info] Training for {timesteps:,} timesteps... (eval every {eval_every_steps:,} steps)")
     model.learn(total_timesteps=timesteps, callback=eval_cb)
 
-    # Save final model
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
-    model_path = f"{output_prefix}.zip"
     model.save(output_prefix)
-    print(f"[ok] Saved final model to {model_path}")
+    print(f"[ok] Saved final model → {output_prefix}.zip")
 
-    # If a best model was saved during eval, print its path
     best_model_files = sorted(eval_dir.glob("best_model.zip"))
     if best_model_files:
-        print(f"[ok] Best model saved by EvalCallback: {best_model_files[-1]}")
+        print(f"[ok] Best model (EvalCallback): {best_model_files[-1]}")
     else:
-        print("[info] No separate best model produced (EvalCallback conditions not met).")
+        print("[info] No separate best model produced by EvalCallback.")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Train PPO agent using SPA-based features")
-    ap.add_argument("--features", type=str,
-                    default="data/features/btc_1h_spa.parquet",
-                    help="Path to features parquet generated by your GA/feature script")
-    ap.add_argument("--output", type=str, default="data/models/ppo_spa_btc_1h",
-                    help="Prefix path to save final model (without .zip)")
-    ap.add_argument("--timesteps", type=int, default=500000)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--eval_every_steps", type=int, default=10000)
-    ap.add_argument("--train_split", type=float, default=0.8)
-    ap.add_argument("--device", type=str, default="auto", choices=["cpu", "cuda", "auto"],
-                    help='Device to use for training.')
+    ap.add_argument("--features",         type=str, default="data/features/btc_1h_spa.parquet")
+    ap.add_argument("--output",           type=str, default="data/models/ppo_spa_btc_1h")
+    ap.add_argument("--timesteps",        type=int, default=3_000_000)
+    ap.add_argument("--seed",             type=int, default=42)
+    ap.add_argument("--eval_every_steps", type=int, default=50_000)
+    ap.add_argument("--train_split",      type=float, default=0.8)
+    ap.add_argument("--device",           type=str, default="cuda", choices=["cpu", "cuda", "auto"])
 
-    # ---- expose shaping knobs ----
-    ap.add_argument("--flat_penalty_bps", type=float, default=0.0)
-    ap.add_argument("--inactivity_steps", type=int, default=256)
-    ap.add_argument("--inactivity_penalty_bps", type=float, default=0.0)
-    ap.add_argument("--turnover_reward_coeff", type=float, default=0.0)
-    ap.add_argument("--trade_threshold", type=float, default=0.01)
-    ap.add_argument("--deadband_frac", type=float, default=0.05)
-    ap.add_argument("--min_hold_steps", type=int, default=0)  # ปิด
-    ap.add_argument("--cooldown_steps", type=int, default=0) # ปิด
+    # shaping knobs
+    ap.add_argument("--flat_penalty_bps",       type=float, default=0.0)
+    ap.add_argument("--inactivity_steps",       type=int,   default=256)
+    ap.add_argument("--inactivity_penalty_bps", type=float, default=1.0)
+    ap.add_argument("--turnover_reward_coeff",  type=float, default=0.0)
+    ap.add_argument("--trade_threshold",        type=float, default=0.01)
+    ap.add_argument("--deadband_frac",          type=float, default=0.05)
+    ap.add_argument("--min_hold_steps",         type=int,   default=0)
+    ap.add_argument("--cooldown_steps",         type=int,   default=3)
 
     args = ap.parse_args()
-    device = args.device  # "cpu" | "cuda" | "auto"
 
     main(
         features_path=Path(args.features),
@@ -328,7 +343,7 @@ if __name__ == "__main__":
         seed=args.seed,
         eval_every_steps=args.eval_every_steps,
         train_split=args.train_split,
-        device_arg=device,
+        device_arg=args.device,
         flat_penalty_bps=args.flat_penalty_bps,
         inactivity_steps=args.inactivity_steps,
         inactivity_penalty_bps=args.inactivity_penalty_bps,
@@ -336,5 +351,5 @@ if __name__ == "__main__":
         trade_threshold=args.trade_threshold,
         deadband_frac=args.deadband_frac,
         min_hold_steps=args.min_hold_steps,
-        cooldown_steps=16
+        cooldown_steps=args.cooldown_steps,
     )

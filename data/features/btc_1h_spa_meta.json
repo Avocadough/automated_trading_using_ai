@@ -1,17 +1,36 @@
 {
   "features": [
     "log_ret_1",
-    "rolling_std_20",
-    "spa_sig_num"
+    "momentum_5",
+    "momentum_10",
+    "momentum_24",
+    "rvol_20",
+    "rvol_50",
+    "vol_regime",
+    "ATR_pct",
+    "BB_width",
+    "BB_position",
+    "RSI_14",
+    "MACD_norm",
+    "close_z_60",
+    "stoch_k",
+    "stoch_d",
+    "vol_ratio",
+    "vol_direction",
+    "spa_sig",
+    "spa_dist"
   ],
   "window_size": 64,
-  "rows": 898481,
+  "freq_hint": "h",
+  "periods_per_year": 8760,
+  "train_split": 0.8,
+  "rows": 26221,
   "source": "data\\raw\\btc_1h.parquet",
   "spa_params": {
-    "d": 89,
-    "alpha": 3.0,
+    "d": 34,
+    "alpha": 8.0,
     "gamma": 1.0,
     "m_ma": 5,
-    "source": "close"
+    "source": "hl2"
   }
 }

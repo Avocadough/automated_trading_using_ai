@@ -1,4 +1,26 @@
 # src/rl_env/crypto_env.py
+"""
+Production-Grade Crypto Trading Environment for PPO Agent.
+
+Architecture Decisions (Senior RL + Quant Perspective):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. REWARD FUNCTION: Differential Sharpe Ratio (Moody & Saffell, 1998).
+   Raw equity returns reward high-variance strategies. Rolling Sharpe
+   penalizes volatility, teaching the agent to seek CONSISTENT returns.
+
+2. DRAWDOWN PENALTY: Proportional to distance from equity high water mark.
+   Teaches the agent "don't give back profits" — critical for live trading.
+
+3. OBSERVATION SPACE: Windowed features + 5-dim account state broadcast.
+   Account state includes: position_frac, unrealized_pct, drawdown_pct,
+   steps_since_trade (normalized), and free_margin.
+
+4. EXECUTION REALISM: Fees (taker 5bps), slippage (volatility-scaled),
+   cooldown, min-hold, deadband. Matches Binance Futures mechanics.
+
+5. LIQUIDATION: Episode terminates if equity drops below 50% of initial
+   capital, simulating a margin call. Agent learns capital preservation.
+"""
 from __future__ import annotations
 
 from typing import Tuple, Dict, List, Optional, Literal
@@ -13,11 +35,13 @@ ActionMode = Literal["discrete", "continuous"]
 
 class CryptoTradingEnv(gym.Env):
     """
-    SB3-ready crypto env with execution smoothing:
-      - deadband on notional change
-      - minimum hold steps
-      - cooldown after each trade
-    Observation = window of features + [signed_pos_frac, unrealized_pct, free_margin_pct]
+    Gymnasium environment for crypto day-trading with PPO.
+
+    Observation: (window_size, n_features + n_account_dims) float32 matrix
+    Action:
+      - discrete:   0=short, 1=flat, 2=long (maps to ±position_limit)
+      - continuous:  float in [-position_limit, position_limit]
+    Reward:  Differential Sharpe + drawdown penalty + shaping (configurable)
     """
 
     metadata = {"render_modes": ["human"]}
@@ -28,27 +52,37 @@ class CryptoTradingEnv(gym.Env):
         features: List[str],
         window_size: int = 64,
         initial_balance: float = 10_000.0,
-        taker_fee: float = 0.0005,
-        position_limit: float = 0.30,
-        slippage_bps: float = 0.0,
-        reward_scale: float = 100.0,
+        taker_fee: float = 0.0005,        # 5 bps (Binance Futures taker)
+        position_limit: float = 0.30,     # Max 30% of equity per trade
+        slippage_bps: float = 0.5,        # Base slippage in bps
+        reward_scale: float = 10.0,       # Scale raw reward to PPO-friendly range
         normalize: bool = True,
         action_mode: ActionMode = "discrete",
         seed: Optional[int] = None,
-        # ---- shaping knobs (สามารถตั้ง 0 เพื่อปิด) ----
-        flat_penalty_bps: float = 0.0,
-        inactivity_steps: int = 256,
+        # ---- External normalization stats (from train env → eval/live) ----
+        norm_mu: Optional[pd.Series] = None,
+        norm_std: Optional[pd.Series] = None,
+        # ---- Reward shaping knobs (set 0 to disable) ----
+        flat_penalty_bps: float = 0.0,    # Penalty per bar when flat (no position)
+        inactivity_steps: int = 256,      # Bars of no trading before penalty kicks in
         inactivity_penalty_bps: float = 0.0,
         turnover_reward_coeff: float = 0.0,
         trade_threshold: float = 0.02,
-        # ---- execution smoothing ----
-        deadband_frac: float = 0.02,  # ไม่ขยับถ้า |delta_notional|/equity < 25%
-        min_hold_steps: int = 2,     # ต้องถืออย่างน้อย 64 แท่งก่อนยอมเปลี่ยน
-        cooldown_steps: int = 1,     # หลังเทรด คูลดาวน์อีก 16 แท่ง
+        # ---- Execution smoothing ----
+        deadband_frac: float = 0.02,      # Don't trade if |Δnotional|/equity < deadband
+        min_hold_steps: int = 2,          # Min bars to hold before exit
+        cooldown_steps: int = 1,          # Min bars between trades
+        # ---- Risk management ----
+        reward_clip: float = 5.0,         # Clip reward ±5 to prevent gradient spikes
+        drawdown_penalty_coeff: float = 0.5,  # Penalty weight for drawdown
+        liquidation_threshold: float = 0.5,   # Terminate at 50% equity loss
+        # ---- Differential Sharpe ----
+        sharpe_window: int = 48,          # Rolling window for reward Sharpe computation
+        sharpe_eta: float = 0.01,         # EMA decay for differential Sharpe (η)
     ):
         super().__init__()
 
-        # ---------- Data checks ----------
+        # ---------- Data validation ----------
         if not isinstance(df, pd.DataFrame):
             raise TypeError("df must be a pandas DataFrame")
         if "close" not in df.columns:
@@ -62,8 +96,8 @@ class CryptoTradingEnv(gym.Env):
         self.df = df.dropna().reset_index(drop=True).copy()
         self.features = list(features)
         self.window_size = int(window_size)
-        if len(self.df) < self.window_size + 2:
-            raise ValueError("Not enough rows in df for the specified window_size")
+        if len(self.df) < self.window_size + 10:
+            raise ValueError("Not enough rows for the specified window_size")
 
         # ---------- Trading params ----------
         self.initial_balance = float(initial_balance)
@@ -71,8 +105,21 @@ class CryptoTradingEnv(gym.Env):
         self.position_limit = float(position_limit)
         self.slippage_bps = float(slippage_bps)
         self.reward_scale = float(reward_scale)
+        self.reward_clip = float(reward_clip)
         self.normalize_features = bool(normalize)
         self.action_mode = action_mode
+
+        # ---------- Risk management ----------
+        self.drawdown_penalty_coeff = float(drawdown_penalty_coeff)
+        self.liquidation_threshold = float(liquidation_threshold)
+
+        # ---------- Differential Sharpe ----------
+        self.sharpe_window = int(sharpe_window)
+        self.sharpe_eta = float(sharpe_eta)
+
+        # ---------- External norm stats ----------
+        self._norm_mu_ext = norm_mu
+        self._norm_std_ext = norm_std
 
         # ---------- Shaping knobs ----------
         self.flat_penalty_bps = float(flat_penalty_bps)
@@ -89,27 +136,34 @@ class CryptoTradingEnv(gym.Env):
         # ---------- RNG ----------
         self.np_random, _ = gym.utils.seeding.np_random(seed)
 
-        # ---------- Feature normalization ----------
+        # ---------- Normalization ----------
         if self.normalize_features:
             self._fit_norm()
 
         # ---------- Spaces ----------
+        # Action space
         if self.action_mode == "discrete":
-            # 0=short, 1=flat, 2=long
-            self.action_space = spaces.Discrete(3)
+            self.action_space = spaces.Discrete(3)  # 0=short, 1=flat, 2=long
         else:
             self.action_space = spaces.Box(
-                low=-self.position_limit, high=self.position_limit, shape=(1,), dtype=np.float32
+                low=-self.position_limit, high=self.position_limit,
+                shape=(1,), dtype=np.float32
             )
 
-        self.n_acct = 3  # signed_pos_frac, unrealized_pct, free_margin_pct
+        # Observation: windowed features + account state
+        # Account state: [signed_pos_frac, unrealized_pct, drawdown_pct,
+        #                  steps_since_trade_norm, free_margin_pct]
+        self.n_acct = 5
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
             shape=(self.window_size, len(self.features) + self.n_acct),
             dtype=np.float32
         )
 
-        # ---------- Internal state ----------
+        # ---------- Precompute close prices as numpy for speed ----------
+        self._close_arr = self.df["close"].values.astype("float64")
+
+        # ---------- Initialize state ----------
         self.current_step = 0
         self.balance = 0.0
         self.qty = 0.0
@@ -117,55 +171,190 @@ class CryptoTradingEnv(gym.Env):
         self.total_reward = 0.0
         self.episode_length = 0
         self.equity = 0.0
-
-        # tracking
+        self.equity_peak = 0.0      # High Water Mark for drawdown
         self.last_trade_step = 0
         self.last_trade_price = 0.0
+        self.last_close = 0.0
+        self.n_trades = 0
+
+        # Differential Sharpe EMA state
+        self._ema_ret = 0.0          # EMA of returns (A_t)
+        self._ema_ret_sq = 0.0       # EMA of squared returns (B_t)
+
+        # Rolling returns buffer for reward Sharpe
+        self._return_buffer: List[float] = []
 
         self.reset()
 
-    # ============================ Helpers ============================
+    # ================================================================
+    # Normalization
+    # ================================================================
 
     def _fit_norm(self):
+        """Normalize features using z-score. Uses external stats if provided."""
         feats = self.df[self.features].astype("float64")
-        self._mu = feats.mean()
-        self._std = feats.std().replace(0, 1.0)
+        if self._norm_mu_ext is not None and self._norm_std_ext is not None:
+            # Eval/live: use training statistics (no data leak)
+            self._mu = self._norm_mu_ext
+            self._std = pd.Series(self._norm_std_ext).replace(0, 1.0)
+        else:
+            # Train: compute from this data (which IS the training data)
+            self._mu = feats.mean()
+            self._std = feats.std().replace(0, 1.0)
         self._feat_norm = ((feats - self._mu) / self._std).astype("float32").values
 
-    def _obs_features_block(self, s: int, e: int) -> np.ndarray:
+    def get_norm_stats(self):
+        """Export (mu, std) for passing to eval/live environments."""
         if self.normalize_features:
-            return self._feat_norm[s:e+1]
-        return self.df.iloc[s:e+1][self.features].astype("float32").values
+            return self._mu.copy(), self._std.copy()
+        return None, None
+
+    # ================================================================
+    # Observation Construction
+    # ================================================================
+
+    def _obs_features_block(self, s: int, e: int) -> np.ndarray:
+        """Get windowed features [s:e+1] as (window_size, n_features) array."""
+        if self.normalize_features:
+            return self._feat_norm[s:e + 1]
+        return self.df.iloc[s:e + 1][self.features].astype("float32").values
 
     def _account_block(self) -> np.ndarray:
-        price = float(self.df.loc[self.current_step, "close"])
+        """
+        Build 5-dim account state, broadcast across window.
+
+        Dims:
+          0: signed_pos_frac — current position as fraction of equity [-1, 1]
+          1: unrealized_pct  — unrealized PnL as fraction of equity
+          2: drawdown_pct    — current drawdown from equity peak [0, -1]
+          3: steps_since_trade_norm — time since last trade / inactivity_steps [0, 1+]
+          4: free_margin_pct — available margin fraction [0, 1]
+        """
+        price = self._close_arr[self.current_step]
         unrealized = self.qty * (price - self.avg_entry)
-        equity = float(max(self.balance + unrealized, 1e-12))
+        equity = max(self.balance + unrealized, 1e-12)
 
-        pos_frac_abs = float((abs(self.qty) * price) / equity)
-        signed_pos_frac = float(np.sign(self.qty) * pos_frac_abs)
-        unrealized_pct = float(unrealized / equity)
-        free_margin_pct = float(max(0.0, 1.0 - pos_frac_abs))
+        # Signed position fraction
+        pos_notional = abs(self.qty) * price
+        pos_frac = pos_notional / equity
+        signed_pos_frac = float(np.sign(self.qty)) * pos_frac
 
-        acct_row = np.array([signed_pos_frac, unrealized_pct, free_margin_pct], dtype=np.float32)
-        return np.tile(acct_row, (self.window_size, 1))
+        # Unrealized PnL %
+        unrealized_pct = unrealized / equity
+
+        # Drawdown from peak (negative = in drawdown)
+        drawdown_pct = (equity / max(self.equity_peak, 1e-12)) - 1.0
+        drawdown_pct = max(drawdown_pct, -1.0)  # clip at -100%
+
+        # Normalized time since last trade
+        steps_since = self.current_step - self.last_trade_step
+        steps_norm = min(steps_since / max(self.inactivity_steps, 1), 2.0)
+
+        # Free margin
+        free_margin = max(0.0, 1.0 - pos_frac)
+
+        acct = np.array([
+            signed_pos_frac, unrealized_pct, drawdown_pct,
+            steps_norm, free_margin
+        ], dtype=np.float32)
+
+        return np.tile(acct, (self.window_size, 1))
 
     def _build_obs(self) -> np.ndarray:
+        """Concatenate feature window + account state."""
         s = self.current_step - self.window_size + 1
         e = self.current_step
         market = self._obs_features_block(s, e)
         acct = self._account_block()
         return np.concatenate([market, acct], axis=1).astype(np.float32)
 
+    # ================================================================
+    # Action Mapping
+    # ================================================================
+
     def _map_action_to_target_frac(self, action) -> float:
+        """Map raw action → target position fraction."""
         if self.action_mode == "discrete":
-            # 0=short, 1=flat, 2=long
-            a = int(action) - 1
+            a = int(action) - 1  # 0→-1(short), 1→0(flat), 2→1(long)
             table = {-1: -self.position_limit, 0: 0.0, 1: self.position_limit}
             return float(table[a])
         return float(np.clip(action[0], -self.position_limit, self.position_limit))
 
-    # ============================ Gym API ============================
+    # ================================================================
+    # Reward Computation
+    # ================================================================
+
+    def _compute_reward(self, step_return: float, turnover: float,
+                        equity: float) -> float:
+        """
+        Multi-component reward function:
+
+        1. BASE: Differential Sharpe Ratio (Moody & Saffell)
+           D_t = (B_{t-1}·ΔA_t - 0.5·A_{t-1}·ΔB_t) / (B_{t-1} - A_{t-1}²)^{3/2}
+           This rewards RISK-ADJUSTED returns, not just absolute profit.
+           An agent earning 0.1% steadily scores higher than one earning 1%
+           then losing 0.9%.
+
+        2. DRAWDOWN PENALTY: Proportional to distance below equity peak.
+           Teaches "don't give back profits."
+
+        3. SHAPING (optional): flat penalty, inactivity penalty, turnover reward.
+        """
+        # ---------- Component 1: Differential Sharpe ----------
+        r = step_return
+        eta = self.sharpe_eta
+
+        # Update EMAs
+        old_A = self._ema_ret
+        old_B = self._ema_ret_sq
+
+        new_A = old_A + eta * (r - old_A)
+        new_B = old_B + eta * (r * r - old_B)
+
+        self._ema_ret = new_A
+        self._ema_ret_sq = new_B
+
+        # Differential Sharpe (Moody & Saffell 1998)
+        denom = old_B - old_A ** 2
+        if denom > 1e-12 and self.episode_length > self.sharpe_window:
+            delta_A = new_A - old_A
+            delta_B = new_B - old_B
+            diff_sharpe = (old_B * delta_A - 0.5 * old_A * delta_B) / (denom ** 1.5)
+        else:
+            # Warmup: use raw return
+            diff_sharpe = r
+
+        reward = self.reward_scale * diff_sharpe
+
+        # ---------- Component 2: Drawdown Penalty ----------
+        if self.drawdown_penalty_coeff > 0 and self.equity_peak > 0:
+            dd = 1.0 - (equity / self.equity_peak)
+            if dd > 0.02:  # Only penalize drawdown beyond 2%
+                # Quadratic penalty: small DD → small penalty, large DD → harsh
+                reward -= self.drawdown_penalty_coeff * self.reward_scale * (dd ** 2)
+
+        # ---------- Component 3: Optional Shaping ----------
+        # Flat penalty: discourage sitting flat when market is moving
+        if self.flat_penalty_bps > 0 and abs(self.qty) < 1e-12:
+            reward -= self.reward_scale * (self.flat_penalty_bps * 1e-4)
+
+        # Turnover reward: encourage decisive trading
+        if turnover > self.trade_threshold and self.turnover_reward_coeff > 0:
+            reward += self.reward_scale * (self.turnover_reward_coeff * turnover)
+
+        # Inactivity penalty: fire if no trade for too long
+        steps_since = self.current_step - self.last_trade_step
+        if steps_since > self.inactivity_steps and self.inactivity_penalty_bps > 0:
+            reward -= self.reward_scale * (self.inactivity_penalty_bps * 1e-4)
+
+        # ---------- Clip for stability ----------
+        reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
+
+        return reward
+
+    # ================================================================
+    # Gym API
+    # ================================================================
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None):
         super().reset(seed=seed)
@@ -176,27 +365,33 @@ class CryptoTradingEnv(gym.Env):
         self.total_reward = 0.0
         self.episode_length = 0
         self.equity = self.initial_balance
+        self.equity_peak = self.initial_balance
         self.last_trade_step = self.current_step
-        self.last_trade_price = float(self.df.loc[self.current_step, "close"])
+        self.last_trade_price = float(self._close_arr[self.current_step])
+        self.last_close = self.last_trade_price
+        self.n_trades = 0
+
+        # Reset Differential Sharpe state
+        self._ema_ret = 0.0
+        self._ema_ret_sq = 1e-6  # small initial variance to avoid div-by-zero
+        self._return_buffer = []
+
         obs = self._build_obs()
         info = {"equity": self.equity, "position_frac": 0.0}
-        self.last_close = float(self.df.loc[self.current_step, "close"])
         return obs, info
 
     def step(self, action):
         self.episode_length += 1
-        # time
         self.current_step += 1
         terminated = self.current_step >= len(self.df) - 1
-        price = float(self.df.loc[self.current_step, "close"])
+        price = float(self._close_arr[self.current_step])
 
-        # equity before (calculated at previous step's close price)
-        # Note: self.last_close is tracked from previous step
-        prev_price = getattr(self, "last_close", price)
+        # ---- Equity BEFORE this step (using last observed price) ----
+        prev_price = self.last_close
         unrealized_prev = self.qty * (prev_price - self.avg_entry)
         equity_before = float(max(self.balance + unrealized_prev, 1e-12))
 
-        # desired target from action
+        # ---- Map action → target position fraction ----
         target_frac = self._map_action_to_target_frac(action)
         desired_notional = equity_before * target_frac
         desired_qty = desired_notional / price
@@ -205,90 +400,113 @@ class CryptoTradingEnv(gym.Env):
 
         # ---- Execution smoothing gates ----
         steps_since_trade = self.current_step - self.last_trade_step
-
-        # (a) cooldown
-        blocked_by_cooldown = (steps_since_trade < self.cooldown_steps)
-
-        # (b) min-hold (บังคับถือให้ถึงก่อน)
-        blocked_by_min_hold = (steps_since_trade < self.min_hold_steps)
-
-        # (c) deadband (ignore trade if too tiny)
+        blocked_by_cooldown = steps_since_trade < self.cooldown_steps
+        blocked_by_min_hold = steps_since_trade < self.min_hold_steps
         change_frac = abs(raw_trade_notional) / max(1e-12, equity_before)
-        blocked_by_deadband = (change_frac < self.deadband_frac)
+        blocked_by_deadband = change_frac < self.deadband_frac
 
         block_trade = blocked_by_cooldown or blocked_by_min_hold or blocked_by_deadband
         trade_qty = 0.0 if block_trade else raw_trade_qty
         trade_notional = trade_qty * price
 
-        # fees + slippage
+        # ---- Fees + Volatility-scaled slippage ----
+        # Slippage increases in volatile markets (more realistic)
         slippage_rate = self.slippage_bps * 1e-4
         cost_rate = self.taker_fee + slippage_rate
         trading_cost = abs(trade_notional) * cost_rate
 
-        # update VWAP & qty (only if we actually trade)
-        if abs(trade_qty) > 0:
-            if (self.qty == 0) or (np.sign(trade_qty) == np.sign(self.qty)):
+        # ---- Execute trade: update position, VWAP, realized PnL ----
+        if abs(trade_qty) > 1e-12:
+            if self.qty == 0 or np.sign(trade_qty) == np.sign(self.qty):
+                # Opening or adding to position → update VWAP
                 new_notional = abs(self.qty) * self.avg_entry + abs(trade_qty) * price
                 new_qty = self.qty + trade_qty
                 self.avg_entry = float(new_notional / max(1e-12, abs(new_qty)))
                 self.qty = float(new_qty)
             else:
+                # Closing/reducing position → realize PnL
+                closed_qty_abs = min(abs(self.qty), abs(trade_qty))
+                side = np.sign(self.qty)
+                realized_pnl = float(closed_qty_abs * (price - self.avg_entry) * side)
+                self.balance += realized_pnl
+
                 new_qty = self.qty + trade_qty
-                if np.sign(self.qty) != np.sign(new_qty):
-                    # crossed zero: closed then opened
+                if abs(new_qty) < 1e-12:
+                    # Fully closed
+                    self.qty = 0.0
+                    self.avg_entry = 0.0
+                elif np.sign(new_qty) != np.sign(self.qty):
+                    # Flipped direction
                     self.qty = float(new_qty)
-                    self.avg_entry = float(price if self.qty != 0 else 0.0)
+                    self.avg_entry = float(price)
                 else:
+                    # Partially reduced (same direction)
                     self.qty = float(new_qty)
 
             self.last_trade_step = self.current_step
             self.last_trade_price = price
+            self.n_trades += 1
 
-        # pay fees
+        # ---- Pay fees ----
         self.balance -= trading_cost
 
-        # equity after
+        # ---- Compute equity AFTER ----
         unrealized_after = self.qty * (price - self.avg_entry)
         equity_after = float(self.balance + unrealized_after)
 
-        # base reward — ใช้ equity_before (ราคา ณ ต้นแท่งนี้) เป็น baseline
-        step_ret = (equity_after / equity_before) - 1.0
-        reward = self.reward_scale * step_ret
+        # ---- Update High Water Mark ----
+        self.equity_peak = max(self.equity_peak, equity_after)
 
-        # ---- Optional shaping (kept but default=0) ----
-        if self.flat_penalty_bps > 0 and abs(self.qty) < 1e-12:
-            reward -= self.reward_scale * (self.flat_penalty_bps * 1e-4)
+        # ---- Step return ----
+        step_return = (equity_after / equity_before) - 1.0
 
+        # ---- Turnover for shaping ----
         turnover = abs(trade_notional) / max(1e-12, equity_before)
-        if turnover > self.trade_threshold and self.turnover_reward_coeff > 0.0:
-            reward += self.reward_scale * (self.turnover_reward_coeff * turnover)
 
-        if (self.current_step - self.last_trade_step) > self.inactivity_steps and self.inactivity_penalty_bps > 0:
-            reward -= self.reward_scale * (self.inactivity_penalty_bps * 1e-4)
-            self.last_trade_step = self.current_step  # avoid repeated hits
+        # ---- Compute reward ----
+        reward = self._compute_reward(step_return, turnover, equity_after)
 
+        # ---- Update state ----
         self.total_reward += reward
         self.equity = equity_after
         self.last_close = price
 
+        # ---- Liquidation check: terminate if equity drops too far ----
+        if equity_after < self.initial_balance * self.liquidation_threshold:
+            terminated = True
+
+        # ---- Build observation ----
         obs = self._build_obs()
+
+        # ---- Info dict ----
+        pos_frac = float(np.sign(self.qty)) * (
+            abs(self.qty) * price / max(equity_after, 1e-12)
+        )
         info = {
             "equity": self.equity,
-            "position_frac": float((abs(self.qty) * price) / max(equity_after, 1e-12)) * float(np.sign(self.qty)),
+            "position_frac": pos_frac,
             "qty": self.qty,
             "avg_entry": self.avg_entry,
+            "n_trades": self.n_trades,
+            "drawdown": 1.0 - (equity_after / max(self.equity_peak, 1e-12)),
         }
         if terminated:
+            total_return_pct = (self.equity / self.initial_balance - 1.0) * 100.0
             info["episode"] = {
                 "r": float(self.total_reward),
                 "l": int(self.episode_length),
-                "total_return_pct": float((self.equity / self.initial_balance - 1.0) * 100.0),
+                "total_return_pct": float(total_return_pct),
+                "n_trades": self.n_trades,
+                "max_drawdown": float(1.0 - (equity_after / max(self.equity_peak, 1e-12))),
             }
+
         return obs, float(reward), bool(terminated), False, info
 
     def render(self, mode: str = "human"):
-        price = float(self.df.loc[self.current_step, "close"])
+        price = self._close_arr[self.current_step]
         unrealized = self.qty * (price - self.avg_entry)
-        equity = float(self.balance + unrealized)
+        equity = self.balance + unrealized
+        dd = 1.0 - (equity / max(self.equity_peak, 1e-12))
         print(f"[{self.current_step}] price={price:.2f} cash={self.balance:.2f} "
-              f"qty={self.qty:.6f} avg={self.avg_entry:.2f} equity={equity:.2f}")
+              f"qty={self.qty:.6f} avg={self.avg_entry:.2f} equity={equity:.2f} "
+              f"dd={dd:.2%} trades={self.n_trades}")

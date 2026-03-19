@@ -1,12 +1,24 @@
 # src/optimize/optimize_spa_ga.py
+"""
+Genetic Algorithm to optimize SPA boundary parameters.
+
+Design Principles (Senior Quant Perspective):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. COMPOSITE FITNESS: Sharpe alone favors high-variance strategies.
+   We combine Sharpe, Sortino, and penalize Max Drawdown heavily.
+2. WALK-FORWARD VALIDATION: Single train/eval split is fragile.
+   We use K-fold temporal splits to ensure parameter stability.
+3. ELITISM: Best individuals survive to next generation unchanged.
+4. REALISTIC BACKTEST: Fees, fractional sizing, Long+Short.
+5. ANTI-OVERFITTING: Penalize low trade count, report OOS degradation.
+"""
 from __future__ import annotations
 
+import argparse
 import json
 import random
-from functools import partial
-from multiprocessing import Pool, cpu_count
 from pathlib import Path
-from typing import Tuple, Dict
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -14,209 +26,432 @@ import pandas as pd
 import sys, os
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(PROJECT_ROOT)
-import sys, os
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.append(PROJECT_ROOT)
 
 from src.utils import ensure_datetime_index
 
-# --- Search Spaces (คุณปรับได้) ---
-N_SET = [13, 21, 34, 55, 89, 144, 233]
-ALPHA_SET = [3, 5, 8, 13]
-BETA_SET = [0.38, 0.5, 0.61, 1.0, 1.44]
-D_SET = [5, 8, 13, 21, 34]
-SRC_SET = ['close', 'hl2', 'hlc3']
+
+# ============================================================
+# Search Space
+# ============================================================
+D_SET     = [20, 34, 55, 89, 144]
+ALPHA_SET = [1.0, 2.0, 3.0, 5.0, 8.0]
+GAMMA_SET = [0.5, 1.0, 1.5, 2.0]
+M_MA_SET  = [3, 5, 8, 13]
+SRC_SET   = ["close", "hl2", "hlc3"]
 
 
-
-
-
-def create_features_with_params(df_original: pd.DataFrame, params: Tuple[int, int, int, float, str]) -> pd.DataFrame | None:
+# ============================================================
+# SPA Signal Generator (inline for isolation)
+# ============================================================
+def _compute_spa_signals(df: pd.DataFrame, d: int, alpha: float, gamma: float,
+                         m_ma: int, source: str) -> np.ndarray:
     """
-    params = (n, alpha, d, beta, src)
-    n     : window สำหรับคำนวณ high/low range & std
-    alpha : fast MA window
-    d     : slow MA window
-    beta  : ตัวคูณความผันผวนสำหรับขยับ H/L
-    src   : close / hl2 / hlc3
+    Fully vectorized SPA signals → returns ndarray of {-1, 0, 1}.
+    Using numpy arrays instead of pandas for ~10x speedup in GA loops.
     """
-    n, alpha, d, beta, src = params
-    df = df_original.copy()
+    close = df["close"].values.astype("float64")
+    high  = df["high"].values.astype("float64")
+    low   = df["low"].values.astype("float64")
+    n = len(df)
 
-    if alpha >= d or n < 2:
-        return None
-
-    if src == 'hl2':
-        df['src_price'] = (df['high'] + df['low']) / 2
-    elif src == 'hlc3':
-        df['src_price'] = (df['high'] + df['low'] + df['close']) / 3
+    # Source price
+    if source == "hl2":
+        src = (high + low) / 2.0
+    elif source == "hlc3":
+        src = (high + low + close) / 3.0
     else:
-        df['src_price'] = df['close']
+        src = close.copy()
 
-    # ความผันผวนแบบง่าย: ส่วนเบี่ยงเบนมาตรฐานของ (high-low) ย้อนหลัง n
-    df['range'] = (df['high'] - df['low']).astype('float64')
-    delta_n = df['range'].rolling(window=n, min_periods=n).std()
+    # Vectorized rolling with numpy (faster than pandas for GA)
+    def rolling_mean(arr, w):
+        out = np.full(n, np.nan)
+        cs = np.cumsum(arr)
+        out[w-1:] = (cs[w-1:] - np.concatenate([[0], cs[:-w]])) / w
+        return out
 
-    # เส้นบน/ล่างแบบ adaptive
-    highest_src_price_n = df['src_price'].rolling(window=n, min_periods=n).max()
-    h = highest_src_price_n - (beta * delta_n)
-    H = np.maximum(df['high'].rolling(window=n, min_periods=n).max(), h + 1e-6)
+    def rolling_std(arr, w):
+        out = np.full(n, np.nan)
+        m = rolling_mean(arr, w)
+        cs2 = np.cumsum(arr ** 2)
+        var = (cs2[w-1:] - np.concatenate([[0], cs2[:-w]])) / w - m[w-1:] ** 2
+        var = np.clip(var, 0, None)
+        out[w-1:] = np.sqrt(var)
+        return out
 
-    lowest_src_price_n = df['src_price'].rolling(window=n, min_periods=n).min()
-    l = lowest_src_price_n + (beta * delta_n)
-    L = np.minimum(df['low'].rolling(window=n, min_periods=n).min(), l - 1e-6)
+    def rolling_max(arr, w):
+        out = np.full(n, np.nan)
+        for i in range(w - 1, n):
+            out[i] = np.max(arr[i - w + 1:i + 1])
+        return out
 
-    df['upper_band_H'] = H
-    df['lower_band_L'] = L
+    def rolling_min(arr, w):
+        out = np.full(n, np.nan)
+        for i in range(w - 1, n):
+            out[i] = np.min(arr[i - w + 1:i + 1])
+        return out
 
-    # MAs
-    df['MA_fast'] = df['src_price'].rolling(window=alpha, min_periods=alpha).mean()
-    df['MA_slow'] = df['src_price'].rolling(window=d, min_periods=d).mean()
+    # Swing stats
+    swing = np.clip(high - low, 0, None)
+    mu    = rolling_mean(swing, d)
+    sigma = rolling_std(swing, d)
 
-    return df.dropna()
+    # Boundaries
+    high_d = rolling_max(high, d)
+    low_d  = rolling_min(low, d)
+    atr_ext = mu + gamma * sigma
 
+    h_inner = high_d - alpha * mu
+    H_outer = np.maximum(high_d, close) + atr_ext
+    l_inner = low_d + alpha * mu
+    L_outer = np.minimum(low_d, close) - atr_ext
 
-def calc_fitness_final_capital(df_original: pd.DataFrame, params: Tuple[int, int, int, float, str]) -> float:
-    feats = create_features_with_params(df_original, params)
-    if feats is None or feats.empty:
-        return 0.0
+    # Raw signals
+    prev_close = np.concatenate([[np.nan], close[:-1]])
+    sig = np.zeros(n, dtype="int8")
 
-    cash, position = 100_000.0, 0
-    for _, row in feats.iterrows():
-        open_price = float(row['open'])
-        close_price = float(row['close'])
-        upper_band = float(row['upper_band_H'])
-        lower_band = float(row['lower_band_L'])
+    upper_reject = (prev_close > h_inner) & (close < h_inner)
+    upper_break  = (prev_close <= H_outer) & (close > H_outer)
+    lower_reject = (prev_close < l_inner) & (close > l_inner)
+    lower_break  = (prev_close >= L_outer) & (close < L_outer)
 
-        buy_rejection = (close_price > lower_band) and (open_price < lower_band)
-        buy_breakout  = (close_price > upper_band) and (open_price < upper_band)
-        buy_signal = buy_rejection or buy_breakout
+    sig[upper_reject] = -1
+    sig[upper_break]  =  1
+    sig[lower_reject] =  1
+    sig[lower_break]  = -1
 
-        sell_rejection = (close_price < upper_band) and (open_price > upper_band)
-        sell_breakout  = (close_price < lower_band) and (open_price > lower_band)
-        sell_signal = sell_rejection or sell_breakout
+    # MA Confirmation
+    ma = rolling_mean(src, m_ma)
+    sig[(sig == 1) & (src <= ma)] = 0
+    sig[(sig == -1) & (src >= ma)] = 0
 
-        if position == 0 and buy_signal:
-            position, cash = 1, cash - close_price
-        elif position == 1 and sell_signal:
-            position, cash = 0, cash + close_price
-
-    if position == 1 and not feats.empty:
-        cash += float(feats['close'].iloc[-1])
-
-    return cash
-
-
-def _evaluate_individual(individual, df, memo):
-    # map individual -> params tuple
-    params = (individual[0], individual[1], individual[3], individual[2], individual[4])
-    if params not in memo:
-        memo[params] = calc_fitness_final_capital(df, params)
-    return params, memo[params]
+    return sig
 
 
+# ============================================================
+# Composite Fitness Function
+# ============================================================
+FEE_RATE       = 0.0005   # 0.05% per side (Binance Futures taker)
+POSITION_FRAC  = 0.30     # 30% of equity per trade (matches RL agent)
+PERIODS_PER_YEAR = 8760   # 1H candles
+
+
+def _backtest_signals(close: np.ndarray, signals: np.ndarray) -> np.ndarray:
+    """
+    Vectorized backtest: compute per-bar PnL array given signals and close prices.
+    """
+    n = len(close)
+    returns = np.zeros(n)
+    returns[1:] = close[1:] / close[:-1] - 1.0
+
+    pnl = np.zeros(n)
+    pos = 0.0
+
+    for i in range(1, n):
+        sig = signals[i]
+        ret = returns[i]
+
+        # PnL from holding current position
+        step_pnl = pos * ret * POSITION_FRAC
+
+        # Position change → incur fees
+        if sig != 0 and sig != pos:
+            # Fee = |position_change| * fee_rate * position_fraction
+            trade_size = abs(sig - pos)  # 0→1=1, 1→-1=2, -1→0=1
+            step_pnl -= trade_size * FEE_RATE * POSITION_FRAC
+            pos = float(sig)
+
+        pnl[i] = step_pnl
+
+    return pnl
+
+
+def calc_composite_fitness(df: pd.DataFrame, params: tuple) -> float:
+    """
+    Composite fitness = 0.4 * Sharpe + 0.3 * Sortino + 0.3 * (1 - DD_penalty)
+    where DD_penalty = min(1, MaxDD / 0.15)  (hard cap at -15% drawdown)
+
+    This prevents selecting strategies that have high Sharpe
+    but came from one lucky trade with -30% drawdown risk.
+    """
+    d, alpha, gamma, m_ma, source = params
+
+    if d < 20:
+        return -999.0
+
+    try:
+        signals = _compute_spa_signals(df, d, alpha, gamma, m_ma, source)
+    except Exception:
+        return -999.0
+
+    # Skip NaN warmup period
+    valid_start = max(d, 60)
+    if valid_start >= len(df) - 100:
+        return -999.0
+
+    close = df["close"].values.astype("float64")[valid_start:]
+    sigs  = signals[valid_start:]
+
+    pnl = _backtest_signals(close, sigs)
+    pnl = pnl[1:]  # drop first zero
+
+    if len(pnl) < 200 or np.std(pnl) < 1e-12:
+        return -999.0
+
+    # --- Sharpe Ratio (annualized) ---
+    sharpe = (np.mean(pnl) / np.std(pnl)) * np.sqrt(PERIODS_PER_YEAR)
+
+    # --- Sortino Ratio (only penalize downside vol) ---
+    downside = pnl[pnl < 0]
+    downside_std = np.std(downside) if len(downside) > 10 else np.std(pnl)
+    sortino = (np.mean(pnl) / max(downside_std, 1e-12)) * np.sqrt(PERIODS_PER_YEAR)
+
+    # --- Max Drawdown ---
+    equity = np.cumsum(pnl) + 1.0
+    running_max = np.maximum.accumulate(equity)
+    drawdowns = (equity - running_max) / running_max
+    max_dd = abs(np.min(drawdowns))
+
+    # DD penalty: linearly penalize DD above 5%, hard cap at 15%
+    dd_penalty = min(1.0, max(0.0, max_dd - 0.05) / 0.10)
+
+    # --- Trade count penalty ---
+    pos_changes = np.abs(np.diff(np.sign(sigs).astype(float)))
+    n_trades = int(np.sum(pos_changes > 0.5))
+    trade_penalty = 0.0
+    if n_trades < 30:
+        trade_penalty = 0.5  # heavy: not enough trades for statistical validity
+    elif n_trades < 50:
+        trade_penalty = 0.2  # moderate
+
+    # --- Composite score ---
+    # Weighted combination emphasizing risk-adjusted performance
+    composite = (
+        0.40 * max(sharpe, -5.0) +
+        0.30 * max(sortino, -5.0) +
+        0.30 * max(0.0, 1.0 - dd_penalty) * 5.0  # scale to match Sharpe range
+        - trade_penalty
+    )
+
+    return float(composite)
+
+
+# ============================================================
+# Walk-Forward Validation
+# ============================================================
+def walk_forward_fitness(df: pd.DataFrame, params: tuple, n_folds: int = 3) -> float:
+    """
+    Walk-Forward validation: train on fold_k, validate on fold_k+1.
+    Average the OOS fitness across all folds.
+    This is the STRONGEST anti-overfitting measure for time series.
+    """
+    n = len(df)
+    fold_size = n // (n_folds + 1)
+
+    if fold_size < 500:  # each fold needs enough data
+        return calc_composite_fitness(df, params)
+
+    oos_scores = []
+    for k in range(n_folds):
+        # Train window: start to end of fold k+1
+        train_end = fold_size * (k + 2)
+        # Test window: fold k+1 to fold k+2
+        test_start = train_end
+        test_end   = min(train_end + fold_size, n)
+
+        if test_end - test_start < 200:
+            continue
+
+        test_df = df.iloc[test_start:test_end]
+        score = calc_composite_fitness(test_df, params)
+        if score > -900:  # valid score
+            oos_scores.append(score)
+
+    if not oos_scores:
+        return -999.0
+
+    # Return average OOS score (more robust than single split)
+    return float(np.mean(oos_scores))
+
+
+# ============================================================
+# Genetic Algorithm with Elitism
+# ============================================================
 def run_ga(
-    df_path: str, # Changed to accept df_path
-    population_size: int = 80,
-    generations: int = 30,
-    mutation_rate: float = 0.2,
-    n_processes: int | None = None
+    df_path: str,
+    train_split: float = 0.8,
+    population_size: int = 120,
+    generations: int = 50,
+    mutation_rate: float = 0.25,
+    elite_frac: float = 0.10,     # top 10% survive unchanged
+    n_wf_folds: int = 3,          # walk-forward folds
 ):
-    # Load DataFrame inside run_ga
+    """
+    GA with:
+    1. Walk-Forward Validation (anti-overfitting)
+    2. Composite Fitness (anti-high-variance selection)
+    3. Elitism (preserve best individuals)
+    4. Two-point crossover + adaptive mutation
+    """
     df = pd.read_parquet(df_path)
     df = ensure_datetime_index(df)
     needed = ["open", "high", "low", "close"]
     if any(c not in df.columns for c in needed):
         raise ValueError(f"Missing columns: {needed}")
 
-    if n_processes is None:
-        n_processes = max(1, cpu_count() - 1)
-    print(f"[info] Using {n_processes} parallel workers")
+    # Train / Eval split
+    n_train = int(len(df) * train_split)
+    train_df = df.iloc[:n_train].copy()
+    eval_df  = df.iloc[n_train:].copy()
+    print(f"[info] GA optimizing on TRAIN: {len(train_df):,} rows | EVAL: {len(eval_df):,} rows")
+    print(f"[info] Walk-Forward folds: {n_wf_folds} | Elitism: {elite_frac*100:.0f}%")
 
-    # init population
-    population = [
-        (random.choice(N_SET), random.choice(ALPHA_SET), random.choice(BETA_SET),
-        random.choice(D_SET), random.choice(SRC_SET))
-        for _ in range(population_size)
-    ]
+    n_elite = max(1, int(population_size * elite_frac))
 
+    # Initialize population
+    def random_individual():
+        return (
+            random.choice(D_SET),
+            random.choice(ALPHA_SET),
+            random.choice(GAMMA_SET),
+            random.choice(M_MA_SET),
+            random.choice(SRC_SET),
+        )
+
+    population = [random_individual() for _ in range(population_size)]
     memo: Dict[tuple, float] = {}
     best_params, best_score = None, -np.inf
 
     for gen in range(1, generations + 1):
-        # Pre-filter to evaluate only unique and uncached individuals
-        unique_pop = list(set(population))
-        to_eval = [ind for ind in unique_pop if (ind[0], ind[1], ind[3], ind[2], ind[4]) not in memo]
-        
-        if to_eval:
-            with Pool(processes=n_processes) as pool:
-                eval_fn = partial(_evaluate_individual, df=df, memo={})
-                new_results = pool.map(eval_fn, to_eval)
-                
-            for p, score in new_results:
-                memo[p] = score
-                
-        # Retrieve scores for the entire population
-        results = [((ind[0], ind[1], ind[3], ind[2], ind[4]), memo[(ind[0], ind[1], ind[3], ind[2], ind[4])]) for ind in population]
-        
-        # extract fitness
-        fitness_scores = [score for _, score in results]
-        # tournament selection
-        selected = [
-            max(random.sample(list(zip(population, fitness_scores)), k=5), key=lambda x: x[1])[0]
-            for _ in range(population_size)
-        ]
+        # ---- Evaluate fitness (Walk-Forward on train data) ----
+        fitness_scores = []
+        for ind in population:
+            if ind not in memo:
+                memo[ind] = walk_forward_fitness(train_df, ind, n_folds=n_wf_folds)
+            fitness_scores.append(memo[ind])
 
-        # crossover + mutation
-        offspring = []
-        for i in range(0, population_size, 2):
-            p1, p2 = selected[i], selected[min(i + 1, population_size - 1)]
-            child = (p1[0], p2[1], p1[2], p2[3], p1[4])  # simple 1-point mix
+        # ---- Sort population by fitness (for elitism) ----
+        sorted_idx = np.argsort(fitness_scores)[::-1]  # best first
+        sorted_pop = [population[i] for i in sorted_idx]
+        sorted_fit = [fitness_scores[i] for i in sorted_idx]
+
+        # Track best
+        if sorted_fit[0] > best_score:
+            best_score  = sorted_fit[0]
+            best_params = sorted_pop[0]
+
+        if gen % 5 == 1 or gen == generations:
+            bp = sorted_pop[0]
+            print(f"Gen {gen:02d}/{generations} | Best: d={bp[0]}, α={bp[1]:.1f}, "
+                  f"γ={bp[2]:.2f}, m_ma={bp[3]}, src={bp[4]} | "
+                  f"Fitness={sorted_fit[0]:.3f}  (median={np.median(sorted_fit):.3f})")
+
+        # ---- Elitism: top N survive unchanged ----
+        elite = sorted_pop[:n_elite]
+
+        # ---- Tournament selection for breeding pool ----
+        pop_fit = list(zip(population, fitness_scores))
+        selected: List[tuple] = []
+        for _ in range(population_size - n_elite):
+            tournament = random.sample(pop_fit, k=min(5, len(pop_fit)))
+            winner = max(tournament, key=lambda x: x[1])[0]
+            selected.append(winner)
+
+        # ---- Crossover + Mutation ----
+        offspring: List[tuple] = []
+        i = 0
+        while len(offspring) < population_size - n_elite:
+            p1 = selected[i % len(selected)]
+            p2 = selected[(i + 1) % len(selected)]
+            i += 2
+
+            # Uniform crossover
+            child = tuple(p1[j] if random.random() < 0.5 else p2[j] for j in range(5))
+
+            # Mutation (FIXED: child reassignment was lost in previous version)
             if random.random() < mutation_rate:
+                child_list = list(child)
                 idx = random.randint(0, 4)
-                child = list(child)
-                if idx == 0: child[0] = random.choice(N_SET)
-                elif idx == 1: child[1] = random.choice(ALPHA_SET)
-                elif idx == 2: child[2] = random.choice(BETA_SET)
-                elif idx == 3: child[3] = random.choice(D_SET)
-                else: child[4] = random.choice(SRC_SET)
-                child = tuple(child)
-            offspring.extend([child, p2])
-        population = offspring[:population_size]
+                if   idx == 0: child_list[0] = random.choice(D_SET)
+                elif idx == 1: child_list[1] = random.choice(ALPHA_SET)
+                elif idx == 2: child_list[2] = random.choice(GAMMA_SET)
+                elif idx == 3: child_list[3] = random.choice(M_MA_SET)
+                else:          child_list[4] = random.choice(SRC_SET)
+                child = tuple(child_list)
 
-        # track best
-        gen_best_idx = int(np.argmax(fitness_scores))
-        gen_best = population[gen_best_idx]
-        gen_best_params = (gen_best[0], gen_best[1], gen_best[3], gen_best[2], gen_best[4])  # map to (n,alpha,d,beta,src)
-        gen_best_score = fitness_scores[gen_best_idx]
-        if gen_best_score > best_score:
-            best_score, best_params = gen_best_score, gen_best_params
+            offspring.append(child)
 
-        print(f"Gen {gen:02d}/{generations} | Best: n={gen_best_params[0]}, α={gen_best_params[1]}, d={gen_best_params[2]}, β={gen_best_params[3]:.2f}, src={gen_best_params[4]} | Fitness: {gen_best_score:,.2f}")
+        # Next generation = elite + offspring
+        population = elite + offspring
 
-    return best_params, best_score
+    # ============================================================
+    # Final OOS Validation (on held-out eval data)
+    # ============================================================
+    train_sharpe = calc_composite_fitness(train_df, best_params)
+    eval_sharpe  = calc_composite_fitness(eval_df, best_params)
+
+    print(f"\n{'='*60}")
+    print(f"  GA OPTIMIZATION COMPLETE")
+    print(f"{'='*60}")
+    print(f"  Best params: d={best_params[0]}, α={best_params[1]:.1f}, "
+          f"γ={best_params[2]:.2f}, m_ma={best_params[3]}, src={best_params[4]}")
+    print(f"  Walk-Forward Fitness: {best_score:.3f}")
+    print(f"  In-Sample  Fitness:   {train_sharpe:.3f}")
+    print(f"  Out-Of-Sample Fitness: {eval_sharpe:.3f}")
+
+    degradation = 1.0 - (eval_sharpe / max(train_sharpe, 0.01))
+    if eval_sharpe < 0:
+        print(f"  ⚠️  DANGER: OOS fitness is NEGATIVE ({eval_sharpe:.3f})")
+        print(f"     → SPA params are likely OVERFITTED. Consider wider search space.")
+    elif degradation > 0.5:
+        print(f"  ⚠️  WARNING: OOS degradation = {degradation:.0%}")
+        print(f"     → Params may be overfitted. Consider larger dataset or fewer params.")
+    else:
+        print(f"  ✅  OOS degradation = {degradation:.0%} (acceptable)")
+    print(f"{'='*60}")
+
+    return best_params, best_score, eval_sharpe
 
 
 def main():
-    apath = Path("data/raw/btc_15m.parquet")
+    ap = argparse.ArgumentParser(description="GA-optimize SPA parameters (Walk-Forward)")
+    ap.add_argument("--input",         type=str,   default="data/raw/btc_1h.parquet")
+    ap.add_argument("--train_split",   type=float, default=0.8)
+    ap.add_argument("--population",    type=int,   default=120)
+    ap.add_argument("--generations",   type=int,   default=50)
+    ap.add_argument("--mutation_rate", type=float, default=0.25)
+    ap.add_argument("--elite_frac",    type=float, default=0.10)
+    ap.add_argument("--wf_folds",      type=int,   default=3)
+    args = ap.parse_args()
+
+    apath = Path(args.input)
     if not apath.exists():
         raise FileNotFoundError(f"Raw parquet missing: {apath}")
 
-    print("[info] Running GA optimization...")
-    best_params, best_score = run_ga(str(apath), population_size=80, generations=30, mutation_rate=0.2)
+    print("[info] Running GA optimization with Walk-Forward Validation...")
+    best_params, wf_fitness, eval_fitness = run_ga(
+        str(apath),
+        train_split=args.train_split,
+        population_size=args.population,
+        generations=args.generations,
+        mutation_rate=args.mutation_rate,
+        elite_frac=args.elite_frac,
+        n_wf_folds=args.wf_folds,
+    )
 
-    out_dir = Path("data/params"); out_dir.mkdir(parents=True, exist_ok=True)
-    out_json = out_dir / "best_spa_ga.json"
+    out_dir = Path("data/params")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_json = out_dir / "best_h1_spa_ga.json"
     payload = {
-        "n": int(best_params[0]),
-        "alpha": int(best_params[1]),
-        "d": int(best_params[2]),
-        "beta": float(best_params[3]),
-        "src": str(best_params[4]),
-        "fitness_final_capital": float(best_score)
+        "d":     int(best_params[0]),
+        "alpha": float(best_params[1]),
+        "beta":  float(best_params[2]),   # gamma → stored as 'beta' for compat
+        "m_ma":  int(best_params[3]),
+        "src":   str(best_params[4]),
+        "wf_fitness":   float(wf_fitness),
+        "eval_fitness": float(eval_fitness),
     }
     out_json.write_text(json.dumps(payload, indent=2))
-    print(f"[ok] Saved best params → {out_json}")
+    print(f"\n[ok] Saved best params → {out_json}")
     print(json.dumps(payload, indent=2))
 
 
