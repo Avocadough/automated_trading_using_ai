@@ -39,29 +39,30 @@ echo ""
 # Train the CNN+LSTM PPO Agent
 # ============================================================
 # Key params:
-#   --timesteps 5000000    = ~6h on H100
+#   --timesteps 500000     = ~40min on H100
 #   --eval_every_steps 50k = evaluate OOS every 50k steps
 #   --device cuda          = use H100 GPU
-#   --cooldown_steps 3     = prevent over-trading
-#   --inactivity_penalty 1 = penalize doing nothing too long
+#   --cooldown_steps 0     = zero action masking (pure PnL learning)
+#   --inactivity_penalty 0 = zero action masking (pure PnL learning)
 # ============================================================
 
 python src/train/train_ppo_spa.py \
     --features              "data/features/btc_1h_spa.parquet" \
     --output                "data/models/ppo_spa_btc_1h" \
-    --timesteps             2500000 \
+    --timesteps             500000 \
     --seed                  42 \
     --eval_every_steps      50000 \
     --train_split           0.8 \
     --device                "cuda" \
+    --n_envs                12 \
     --flat_penalty_bps      0.0 \
-    --inactivity_steps      24 \
-    --inactivity_penalty_bps 5.0 \
+    --inactivity_steps      256 \
+    --inactivity_penalty_bps 0.0 \
     --turnover_reward_coeff 0.0 \
-    --trade_threshold       0.01 \
-    --deadband_frac         0.05 \
+    --trade_threshold       0.0 \
+    --deadband_frac         0.0 \
     --min_hold_steps        0 \
-    --cooldown_steps        3
+    --cooldown_steps        0
 
 echo ""
 echo "=========================================="

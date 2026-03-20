@@ -95,6 +95,40 @@ def calculate_stochastic(high: pd.Series, low: pd.Series, close: pd.Series,
     return (k - 50.0) / 50.0, (d - 50.0) / 50.0
 
 
+def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series,
+                  period: int = 14) -> pd.Series:
+    """
+    Average Directional Index — measures TREND STRENGTH regardless of direction.
+    ADX ∈ [0, 100]:  <20 = no trend (range-bound),  >40 = strong trend.
+    Rescaled to [-1, 1] via (ADX - 50) / 50 for NN friendliness.
+    """
+    # True Range
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # Directional Movement
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    # Wilder smoothing (EMA with alpha = 1/period)
+    atr_smooth = tr.ewm(alpha=1/period, adjust=False).mean()
+    plus_di  = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() /
+                      atr_smooth.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() /
+                      atr_smooth.replace(0, np.nan))
+
+    # DX and ADX
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1/period, adjust=False).mean()
+
+    # Rescale [0, 100] → [-1, 1]
+    return ((adx - 50.0) / 50.0).clip(-1, 1)
+
+
 def encode_signal(sig: pd.Series) -> pd.Series:
     """Map SPA string signal → numeric {-1, 0, 1}."""
     m = {"short": -1, "none": 0, "long": 1}
@@ -114,7 +148,14 @@ def make_features_spa(
     spa_gamma: float = 1.0,
     spa_m_ma: int = 5,
     spa_source: str = "close",
-    train_split: float = 0.8
+    train_split: float = 0.8,
+    # --- Trend indicator periods (GA-optimizable) ---
+    adx_period: int = 14,
+    ema_fast: int = 50,
+    ema_slow: int = 200,
+    macd_fast: int = 12,
+    macd_slow: int = 26,
+    macd_signal: int = 9,
 ):
     """
     Build RL-ready features combining SPA signals + full TA indicators.
@@ -185,7 +226,16 @@ def make_features_spa(
     df["RSI_14"] = calculate_rsi(close, 14)
 
     # MACD histogram normalized by price → dimensionless
-    df["MACD_norm"] = calculate_macd_normalized(close, 12, 26, 9)
+    df["MACD_norm"] = calculate_macd_normalized(close, macd_fast, macd_slow, macd_signal)
+
+    # MACD histogram normalized by rolling ATR → vol-regime-invariant
+    # Superior to price normalization during high-volatility events
+    ema_fast_line = close.ewm(span=macd_fast, adjust=False).mean()
+    ema_slow_line = close.ewm(span=macd_slow, adjust=False).mean()
+    macd_line   = ema_fast_line - ema_slow_line
+    macd_sig_line = macd_line.ewm(span=macd_signal, adjust=False).mean()
+    macd_hist   = macd_line - macd_sig_line
+    df["MACD_hist_atr"] = (macd_hist / raw_atr.replace(0, np.nan)).clip(-5, 5)
 
     # Z-score of close vs 60-bar MA → stationary mean-reversion signal
     # Using log returns for z-score computation avoids non-stationarity
@@ -197,6 +247,32 @@ def make_features_spa(
     stoch_k, stoch_d = calculate_stochastic(high, low, close)
     df["stoch_k"] = stoch_k
     df["stoch_d"] = stoch_d
+
+    # ============================================================
+    # 3b) TREND STRENGTH & DIRECTION — New features for trend-following
+    #     Solves: "Oscillator Ceiling" where RSI/Stoch saturate at ±1
+    #     during mega rallies, leaving the agent blind to trend continuation.
+    # ============================================================
+    print("[info] Computing trend strength & direction features...")
+
+    # ADX: Trend STRENGTH (direction-agnostic)
+    # ADX < 0 (i.e. raw < 50) → no trend, mean-revert
+    # ADX > 0 (i.e. raw > 50) → strong trend, ride it
+    df["ADX_14"] = calculate_adx(high, low, close, adx_period)
+
+    # Normalized EMA Distances: Trend DIRECTION relative to macro structure
+    #
+    # WHY THIS PREVENTS GRADIENT EXPLOSIONS AT ALL-TIME HIGHS:
+    # Raw EMA values (e.g., $90,000) would create enormous activations that
+    # blow up LSTM cell states. But (Close - EMA) / EMA is a small, bounded
+    # percentage (typically ±5%). Even at a $200k ATH, if EMA(200) = $180k,
+    # the normalized distance is only (200k-180k)/180k = +0.11 — perfectly
+    # digestible by the neural network.
+    #
+    ema_fast_ma  = close.ewm(span=ema_fast, adjust=False).mean()
+    ema_slow_ma  = close.ewm(span=ema_slow, adjust=False).mean()
+    df["ema_dist_50"]  = ((close - ema_fast_ma)  / ema_fast_ma.replace(0, np.nan)).clip(-0.3, 0.3)
+    df["ema_dist_200"] = ((close - ema_slow_ma) / ema_slow_ma.replace(0, np.nan)).clip(-0.5, 0.5)
 
     # ============================================================
     # 4) VOLUME — Only if available, all stationary
@@ -257,9 +333,15 @@ def make_features_spa(
         # --- Momentum (all centered ~0, bounded ±1 or clipped) ---
         "RSI_14",         # [-1, 1] centered RSI
         "MACD_norm",      # MACD hist / close (dimensionless)
+        "MACD_hist_atr",  # MACD hist / ATR (vol-regime-invariant, clipped ±5)
         "close_z_60",     # Price z-score vs 60-bar MA (clipped ±4)
         "stoch_k",        # [-1, 1] Stochastic %K
         "stoch_d",        # [-1, 1] Stochastic %D
+
+        # --- Trend Strength & Direction (anti-oscillator-ceiling) ---
+        "ADX_14",         # [-1, 1] trend strength (direction-agnostic)
+        "ema_dist_50",    # (close - EMA50) / EMA50 (clipped ±0.3)
+        "ema_dist_200",   # (close - EMA200) / EMA200 (clipped ±0.5)
 
         # --- Volume (stationary, clipped) ---
         "vol_ratio",      # Volume / MA(20) - 1 (centered at 0)
@@ -361,23 +443,42 @@ if __name__ == "__main__":
     ap.add_argument("--spa_m_ma",   type=int,   default=5)
     ap.add_argument("--spa_source", type=str,   default="close", choices=["close", "hl2", "hlc3"])
     ap.add_argument("--train_split",type=float, default=0.8)
+
+    # Trend indicator periods (GA-optimizable)
+    ap.add_argument("--adx_period",  type=int, default=14)
+    ap.add_argument("--ema_fast",    type=int, default=50)
+    ap.add_argument("--ema_slow",    type=int, default=200)
+    ap.add_argument("--macd_fast",   type=int, default=12)
+    ap.add_argument("--macd_slow",   type=int, default=26)
+    ap.add_argument("--macd_signal", type=int, default=9)
+
     ap.add_argument("--params_file",type=str,   default="data/params/best_h1_spa_ga.json",
                     help="Path to best_spa_ga.json to auto-load GA parameters.")
 
     args = ap.parse_args()
 
-    # Auto-load GA-optimised SPA params if available
+    # Auto-load GA-optimised params if available (SPA + trend indicators)
     if args.params_file and Path(args.params_file).exists():
-        print(f"[info] Loading optimised SPA params from {args.params_file}")
+        print(f"[info] Loading optimised params from {args.params_file}")
         with open(args.params_file, "r") as f:
             ga_data = json.load(f)
+        # SPA params
         args.spa_d      = int(ga_data.get("d", args.spa_d))
         args.spa_alpha  = float(ga_data.get("alpha", args.spa_alpha))
         args.spa_gamma  = float(ga_data.get("beta", args.spa_gamma))
         args.spa_m_ma   = int(ga_data.get("m_ma", args.spa_m_ma))
         args.spa_source = ga_data.get("src", args.spa_source)
-        print(f"       -> d={args.spa_d}, alpha={args.spa_alpha}, gamma={args.spa_gamma}, "
+        # Trend indicator params (from expanded GA genome)
+        args.adx_period  = int(ga_data.get("adx_period", args.adx_period))
+        args.ema_fast    = int(ga_data.get("ema_fast", args.ema_fast))
+        args.ema_slow    = int(ga_data.get("ema_slow", args.ema_slow))
+        args.macd_fast   = int(ga_data.get("macd_fast", args.macd_fast))
+        args.macd_slow   = int(ga_data.get("macd_slow", args.macd_slow))
+        args.macd_signal = int(ga_data.get("macd_signal", args.macd_signal))
+        print(f"       -> SPA: d={args.spa_d}, alpha={args.spa_alpha}, gamma={args.spa_gamma}, "
               f"m_ma={args.spa_m_ma}, src={args.spa_source}")
+        print(f"       -> Trend: ADX_p={args.adx_period}, EMA={args.ema_fast}/{args.ema_slow}, "
+              f"MACD={args.macd_fast}/{args.macd_slow}/{args.macd_signal}")
 
     make_features_spa(
         input_parquet    = Path(args.input),
@@ -389,4 +490,10 @@ if __name__ == "__main__":
         spa_m_ma         = args.spa_m_ma,
         spa_source       = args.spa_source,
         train_split      = args.train_split,
+        adx_period       = args.adx_period,
+        ema_fast         = args.ema_fast,
+        ema_slow         = args.ema_slow,
+        macd_fast        = args.macd_fast,
+        macd_slow        = args.macd_slow,
+        macd_signal      = args.macd_signal,
     )

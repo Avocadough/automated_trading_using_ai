@@ -12,9 +12,13 @@
     "BB_position",
     "RSI_14",
     "MACD_norm",
+    "MACD_hist_atr",
     "close_z_60",
     "stoch_k",
     "stoch_d",
+    "ADX_14",
+    "ema_dist_50",
+    "ema_dist_200",
     "vol_ratio",
     "vol_direction",
     "spa_sig",
@@ -27,10 +31,10 @@
   "rows": 26221,
   "source": "data\\raw\\btc_1h.parquet",
   "spa_params": {
-    "d": 34,
-    "alpha": 8.0,
-    "gamma": 1.0,
-    "m_ma": 5,
-    "source": "hl2"
+    "d": 55,
+    "alpha": 2.0,
+    "gamma": 2.0,
+    "m_ma": 8,
+    "source": "close"
   }
 }

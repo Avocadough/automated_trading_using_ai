@@ -23,11 +23,81 @@ import os, sys
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.append(PROJECT_ROOT)
 
+try:
+    import yfinance as yf
+    _YF_AVAILABLE = True
+except ImportError:
+    _YF_AVAILABLE = False
+    print("[warn] yfinance not installed — S&P 500 benchmark will be skipped.")
+    print("       Install with:  pip install yfinance")
+
 from src.rl_env.crypto_env import CryptoTradingEnv
 from src.eval.institutional_tearsheet import run_institutional_eval
 from src.eval.academic_report import (
     compute_metrics, compute_train_sharpe, AcademicReport
 )
+
+
+def fetch_sp500_equity(
+    timestamps: pd.DatetimeIndex | pd.Index,
+    initial_balance: float = 10_000.0,
+) -> np.ndarray | None:
+    """
+    Download ^GSPC daily closes via yfinance and forward-fill missing values
+    (weekends / US holidays) so that every crypto 24/7 hourly bar has a price.
+
+    Returns an equity array starting at initial_balance, or None on failure.
+    """
+    if not _YF_AVAILABLE:
+        return None
+
+    # --- Determine the date range of the OOS window ---
+    if isinstance(timestamps, pd.DatetimeIndex) and len(timestamps) > 0:
+        start_dt = timestamps[0].strftime("%Y-%m-%d")
+        end_dt   = (timestamps[-1] + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    else:
+        print("[warn] eval_df has no DatetimeIndex — S&P 500 fetch skipped.")
+        return None
+
+    try:
+        print(f"[info] Fetching S&P 500 (^GSPC) from {start_dt} to {end_dt} ...")
+        ticker = yf.Ticker("^GSPC")
+        sp_df  = ticker.history(start=start_dt, end=end_dt, interval="1d")
+        if sp_df.empty:
+            print("[warn] yfinance returned empty dataframe for ^GSPC.")
+            return None
+
+        # Keep only the Close column; use UTC-aware index
+        sp_close = sp_df["Close"].copy()
+        sp_close.index = sp_close.index.tz_convert("UTC") if sp_close.index.tz else sp_close.index.tz_localize("UTC")
+
+        # Build a target index that matches the OOS bars (UTC)
+        if timestamps.tz is None:
+            target_idx = timestamps.tz_localize("UTC")
+        else:
+            target_idx = timestamps.tz_convert("UTC")
+
+        # Reindex to hourly, forward-fill weekends/holidays
+        sp_hourly = sp_close.reindex(target_idx, method="ffill")
+
+        # If the very first bar is NaN (S&P trading hasn't started yet), backfill
+        sp_hourly = sp_hourly.bfill()
+
+        if sp_hourly.isna().all():
+            print("[warn] S&P 500 data could not be aligned to OOS timestamps.")
+            return None
+
+        # Normalise to an equity curve starting at initial_balance
+        sp_vals = sp_hourly.values.astype("float64")
+        first_valid = sp_vals[~np.isnan(sp_vals)][0]
+        sp_equity = initial_balance * (sp_vals / first_valid)
+        print(f"[info] S&P 500 equity curve: {len(sp_equity):,} bars, "
+              f"return={(sp_equity[-1]/sp_equity[0]-1)*100:+.2f}%")
+        return sp_equity
+
+    except Exception as exc:
+        print(f"[warn] S&P 500 fetch failed: {exc}")
+        return None
 
 
 def load_meta(features_path: Path):
@@ -144,11 +214,19 @@ def run_eval(model_path: Path, features_path: Path, out_dir: Path):
     missing = [c for c in need_cols if c not in df_all.columns]
     if missing:
         raise ValueError(f"Columns missing: {missing}")
+    # Preserve the DatetimeIndex BEFORE resetting so S&P 500 fetch can use
+    # real timestamps when forward-filling to 24/7 crypto hourly bars.
+    raw_datetime_index = df_all.index if isinstance(
+        df_all.index, pd.DatetimeIndex) else None
     df_all = df_all[need_cols].dropna().reset_index(drop=True)
 
     n_train = int(len(df_all) * train_split)
     train_df = df_all.iloc[:n_train].copy()
     eval_df = df_all.iloc[n_train:].copy()
+
+    # Re-assign the datetime index to eval_df so fetch_sp500_equity() works
+    if raw_datetime_index is not None and len(raw_datetime_index) == len(df_all):
+        eval_df.index = raw_datetime_index[n_train:n_train + len(eval_df)]
     print(f"[info] Train: {len(train_df):,} | Test (OOS): {len(eval_df):,}")
 
     # ==================================================================
@@ -167,7 +245,7 @@ def run_eval(model_path: Path, features_path: Path, out_dir: Path):
     eval_env = build_env(eval_df, features, window_size)
     equity, actions, pos_frac, trades, n_trades = _run_episode(model, eval_env)
 
-    # Benchmark (Buy & Hold)
+    # Benchmark (Buy & Hold BTC)
     bm_prices = eval_df["close"].values.astype("float64")
     bm_offset = window_size
     bm_prices_aligned = bm_prices[bm_offset:bm_offset + len(equity)]
@@ -176,6 +254,25 @@ def run_eval(model_path: Path, features_path: Path, out_dir: Path):
                                     (0, len(equity) - len(bm_prices_aligned)),
                                     mode="edge")
     bm_equity = 10_000.0 * (bm_prices_aligned / bm_prices_aligned[0])
+
+    # ---------------------------------------------------------------
+    # S&P 500 Benchmark — fetched automatically via yfinance
+    # Aligns ^GSPC daily closes to the crypto 24/7 hourly OOS index
+    # by forward-filling weekends and US market holidays.
+    # ---------------------------------------------------------------
+    sp500_equity: np.ndarray | None = None
+    if isinstance(eval_df.index, pd.DatetimeIndex):
+        ts_index = eval_df.index[bm_offset:bm_offset + len(equity)]
+        sp500_equity = fetch_sp500_equity(ts_index, initial_balance=10_000.0)
+        if sp500_equity is not None and len(sp500_equity) != len(equity):
+            # Trim/pad to match exactly
+            sp500_equity = sp500_equity[:len(equity)]
+            if len(sp500_equity) < len(equity):
+                sp500_equity = np.pad(sp500_equity,
+                                      (0, len(equity) - len(sp500_equity)),
+                                      mode="edge")
+    else:
+        print("[info] eval_df has no DatetimeIndex — S&P 500 benchmark skipped.")
 
     # Save raw data
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -194,14 +291,16 @@ def run_eval(model_path: Path, features_path: Path, out_dir: Path):
 
     metrics = compute_metrics(
         equity=equity, benchmark_equity=bm_equity, trades=trades,
-        periods_per_year=periods_per_year, initial_balance=10_000.0)
+        periods_per_year=periods_per_year, initial_balance=10_000.0,
+        sp500_equity=sp500_equity)
 
     report = AcademicReport("CNN+LSTM PPO × SPA Day Trader")
     reports_dir = out_dir / "reports"
     report.generate(
         equity=equity, benchmark_equity=bm_equity, returns=returns,
         trades=trades, metrics=metrics, train_sharpe=train_sharpe,
-        periods_per_year=periods_per_year, output_dir=reports_dir)
+        periods_per_year=periods_per_year, output_dir=reports_dir,
+        sp500_equity=sp500_equity)
 
     # ==================================================================
     # 4. INSTITUTIONAL TEARSHEET

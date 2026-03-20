@@ -1,9 +1,15 @@
 {
-  "d": 34,
-  "alpha": 8.0,
-  "beta": 1.0,
-  "m_ma": 5,
-  "src": "hl2",
-  "wf_fitness": 2.3616667590276417,
-  "eval_fitness": 0.5175405898760352
+  "d": 55,
+  "alpha": 2.0,
+  "beta": 2.0,
+  "m_ma": 8,
+  "src": "close",
+  "adx_period": 10,
+  "ema_fast": 34,
+  "ema_slow": 114,
+  "macd_fast": 9,
+  "macd_slow": 29,
+  "macd_signal": 9,
+  "wf_fitness": 3.2595062603574316,
+  "eval_fitness": -1.1928647898513223
 }

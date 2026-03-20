@@ -49,6 +49,7 @@ def compute_metrics(
     trades: List[Dict],
     periods_per_year: int = 8760,
     initial_balance: float = 10_000.0,
+    sp500_equity: Optional[np.ndarray] = None,
 ) -> Dict:
     """Compute all academic-standard metrics."""
     n = len(equity)
@@ -103,13 +104,22 @@ def compute_metrics(
     )
     avg_monthly_cashflow = total_realized / n_months
 
-    # Alpha (outperformance vs benchmark)
+    # Alpha (outperformance vs BTC Buy & Hold)
     alpha = total_return - bm_total_return
+
+    # S&P 500 total return (optional)
+    sp500_total_return: Optional[float] = None
+    alpha_vs_sp500: Optional[float] = None
+    if sp500_equity is not None and len(sp500_equity) > 1:
+        sp500_total_return = float((sp500_equity[-1] / sp500_equity[0]) - 1.0)
+        alpha_vs_sp500 = total_return - sp500_total_return
 
     return {
         "total_return": total_return,
         "bm_total_return": bm_total_return,
         "alpha": alpha,
+        "sp500_total_return": sp500_total_return,
+        "alpha_vs_sp500": alpha_vs_sp500,
         "annualized_return": ann_return,
         "annualized_volatility": ann_vol,
         "sharpe_ratio": sharpe,
@@ -160,6 +170,7 @@ class AcademicReport:
         train_sharpe: Optional[float] = None,
         periods_per_year: int = 8760,
         output_dir: Path = Path("data/eval/reports"),
+        sp500_equity: Optional[np.ndarray] = None,
     ):
         """Generate all academic plots and save to output_dir."""
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,10 +185,11 @@ class AcademicReport:
             "figure.dpi": 150,
         })
 
-        # 1. Cumulative Returns Comparison
+        # 1. Cumulative Returns Comparison (Agent + BTC B&H + S&P 500)
         self._plot_cumulative_returns(
             equity, benchmark_equity, metrics,
-            output_dir / "cumulative_returns.png"
+            output_dir / "cumulative_returns.png",
+            sp500_equity=sp500_equity,
         )
 
         # 2. Underwater (Drawdown) Plot
@@ -196,7 +208,8 @@ class AcademicReport:
         self._plot_full_report(
             equity, benchmark_equity, returns, trades,
             metrics, train_sharpe, periods_per_year,
-            output_dir / "academic_report.pdf"
+            output_dir / "academic_report.pdf",
+            sp500_equity=sp500_equity,
         )
 
         # 5. Console output
@@ -205,7 +218,8 @@ class AcademicReport:
     # ----------------------------------------------------------------
     # Plot 1: Cumulative Returns — Agent vs Buy & Hold
     # ----------------------------------------------------------------
-    def _plot_cumulative_returns(self, equity, benchmark, metrics, path):
+    def _plot_cumulative_returns(self, equity, benchmark, metrics, path,
+                                  sp500_equity=None):
         fig, ax = plt.subplots(figsize=(12, 5))
 
         n = min(len(equity), len(benchmark))
@@ -221,14 +235,24 @@ class AcademicReport:
         ax.plot(bm_pct, color="#ea4335", linewidth=1.2, linestyle="--",
                 label=f'Buy & Hold BTC ({metrics["bm_total_return"]*100:+.1f}%)')
 
+        # S&P 500 third line
+        if sp500_equity is not None and len(sp500_equity) > 1:
+            sp_n = min(n, len(sp500_equity))
+            sp_pct = (sp500_equity[:sp_n] / sp500_equity[0] - 1) * 100
+            sp_ret = metrics.get("sp500_total_return")
+            sp_label = f'S&P 500 ({sp_ret*100:+.1f}%)' if sp_ret is not None else 'S&P 500'
+            ax.plot(sp_pct, color="#f5a623", linewidth=1.2, linestyle=":",
+                    label=sp_label)
+
         ax.fill_between(range(n), eq_pct, bm_pct,
                         where=eq_pct > bm_pct,
-                        color="#34a853", alpha=0.15, label="Outperformance (Alpha)")
+                        color="#34a853", alpha=0.15, label="Alpha vs BTC B&H")
         ax.fill_between(range(n), eq_pct, bm_pct,
                         where=eq_pct < bm_pct,
                         color="#ea4335", alpha=0.10)
 
-        ax.set_title("Cumulative Returns: Agent vs. Buy & Hold",
+        title_suffix = " & S&P 500" if sp500_equity is not None else ""
+        ax.set_title(f"Cumulative Returns: Agent vs. Buy & Hold{title_suffix}",
                      fontsize=14, fontweight="bold")
         ax.set_xlabel("Time Steps (1H bars)")
         ax.set_ylabel("Cumulative Return (%)")
@@ -322,7 +346,8 @@ class AcademicReport:
     # Full Combined Report (Multi-page PDF)
     # ----------------------------------------------------------------
     def _plot_full_report(self, equity, benchmark, returns, trades,
-                          metrics, train_sharpe, ppy, path):
+                          metrics, train_sharpe, ppy, path,
+                          sp500_equity=None):
         with PdfPages(str(path)) as pdf:
             # --- Page 1: Charts ---
             fig = plt.figure(figsize=(14, 18))
@@ -335,7 +360,7 @@ class AcademicReport:
                 fontsize=16, fontweight="bold", y=0.98
             )
 
-            # Cumulative returns
+            # Cumulative returns (3-line: Agent + BTC B&H + S&P 500)
             ax1 = fig.add_subplot(gs[0])
             n = min(len(equity), len(benchmark))
             eq_pct = (equity[:n] / equity[0] - 1) * 100
@@ -343,11 +368,18 @@ class AcademicReport:
             ax1.plot(eq_pct, color="#1a73e8", lw=1.8,
                      label=f'Agent ({metrics["total_return"]*100:+.1f}%)')
             ax1.plot(bm_pct, color="#ea4335", lw=1.2, ls="--",
-                     label=f'Buy & Hold ({metrics["bm_total_return"]*100:+.1f}%)')
+                     label=f'Buy & Hold BTC ({metrics["bm_total_return"]*100:+.1f}%)')
+            if sp500_equity is not None and len(sp500_equity) > 1:
+                sp_n = min(n, len(sp500_equity))
+                sp_pct = (sp500_equity[:sp_n] / sp500_equity[0] - 1) * 100
+                sp_ret = metrics.get("sp500_total_return")
+                sp_label = f'S&P 500 ({sp_ret*100:+.1f}%)' if sp_ret is not None else 'S&P 500'
+                ax1.plot(sp_pct, color="#f5a623", lw=1.2, ls=":", label=sp_label)
             ax1.fill_between(range(n), eq_pct, bm_pct,
                              where=eq_pct > bm_pct,
                              color="#34a853", alpha=0.12)
-            ax1.set_title("Cumulative Returns: Agent vs Buy & Hold",
+            title_suffix = " & S&P 500" if sp500_equity is not None else ""
+            ax1.set_title(f"Cumulative Returns: Agent vs Buy & Hold{title_suffix}",
                          fontweight="bold")
             ax1.set_ylabel("Return (%)")
             ax1.legend(fontsize=9)
@@ -408,8 +440,15 @@ class AcademicReport:
 
             table_data = [
                 ["Total Return (Agent)", f'{metrics["total_return"]*100:+.2f}%'],
-                ["Total Return (Buy & Hold)", f'{metrics["bm_total_return"]*100:+.2f}%'],
-                ["Alpha (Outperformance)", f'{metrics["alpha"]*100:+.2f}%'],
+                ["Total Return (BTC Buy & Hold)", f'{metrics["bm_total_return"]*100:+.2f}%'],
+                ["Alpha vs BTC B&H", f'{metrics["alpha"]*100:+.2f}%'],
+            ]
+            if metrics.get("sp500_total_return") is not None:
+                table_data.append(["Total Return (S&P 500)",
+                                   f'{metrics["sp500_total_return"]*100:+.2f}%'])
+                table_data.append(["Alpha vs S&P 500",
+                                   f'{metrics["alpha_vs_sp500"]*100:+.2f}%'])
+            table_data += [
                 ["Annualized Return", f'{metrics["annualized_return"]*100:.2f}%'],
                 ["Annualized Volatility", f'{metrics["annualized_volatility"]*100:.2f}%'],
                 ["Sharpe Ratio (OOS)", f'{metrics["sharpe_ratio"]:.3f}'],
@@ -453,8 +492,11 @@ class AcademicReport:
         print(f" ACADEMIC EVALUATION REPORT — Out-Of-Sample")
         print(f"{'='*60}")
         print(f"  Agent Total Return  : {metrics['total_return']*100:+.2f}%")
-        print(f"  Buy&Hold Return     : {metrics['bm_total_return']*100:+.2f}%")
-        print(f"  Alpha               : {metrics['alpha']*100:+.2f}%")
+        print(f"  BTC Buy&Hold Return : {metrics['bm_total_return']*100:+.2f}%")
+        print(f"  Alpha vs BTC B&H    : {metrics['alpha']*100:+.2f}%")
+        if metrics.get("sp500_total_return") is not None:
+            print(f"  S&P 500 Return      : {metrics['sp500_total_return']*100:+.2f}%")
+            print(f"  Alpha vs S&P 500    : {metrics['alpha_vs_sp500']*100:+.2f}%")
         print(f"  —")
         print(f"  Annualized Return   : {metrics['annualized_return']*100:.2f}%")
         print(f"  Annualized Vol      : {metrics['annualized_volatility']*100:.2f}%")
@@ -478,6 +520,10 @@ class AcademicReport:
             else:
                 print(f"  Degradation         : N/A (train Sharpe ≈ 0)")
 
-        winner = "AGENT ✅" if metrics["alpha"] > 0 else "BUY & HOLD ❌"
-        print(f"\n  >>> Verdict: {winner}")
+        # Dual verdict: vs BTC and vs S&P 500
+        winner_btc = "AGENT ✅" if metrics["alpha"] > 0 else "BUY & HOLD ❌"
+        print(f"\n  >>> Verdict vs BTC B&H : {winner_btc}")
+        if metrics.get("alpha_vs_sp500") is not None:
+            winner_sp = "AGENT ✅" if metrics["alpha_vs_sp500"] > 0 else "S&P 500 ❌"
+            print(f"  >>> Verdict vs S&P 500 : {winner_sp}")
         print(f"{'='*60}\n")

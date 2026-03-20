@@ -10,7 +10,7 @@ graph TD;
     B --> C[optimize_spa_ga.py]
     C -->|Walk-Forward GA: Sharpe+Sortino+DD| D[make_features_spa.py]
     B --> D
-    D -->|19 I(0) Stationary Features| E[CryptoTradingEnv]
+    D -->|23 I(0) Stationary Features| E[CryptoTradingEnv]
     E -->|Diff Sharpe Reward + Liquidation| F[train_ppo_spa.py]
     F -->|CNN+LSTM PPO| G[eval_ppo_spa.py]
     G --> H[Academic Report]
@@ -32,13 +32,15 @@ graph TD;
 - **Elitism:** Top 10% survive unchanged per generation.
 
 ### ✅ Feature Engineering (`features/make_features_spa.py`)
-- **19 features**, all I(0) stationary, scale-invariant, and bounded.
-- RSI/Stochastic rescaled [-1,1], MACD normalized by close, `vol_regime` for regime detection.
+- **23 features**, all I(0) stationary, scale-invariant, and strictly bounded to prevent CNN poisoning (e.g., `rvol` clipped to [0, 0.5]).
+- RSI/Stochastic rescaled [-1,1], MACD normalized by close and by ATR, `vol_regime` for regime detection.
+- **Trend-awareness:** ADX (trend strength), normalized EMA distances (50/200), MACD hist/ATR.
 - Runtime ADF stationarity audit.
 
 ### ✅ RL Environment (`rl_env/crypto_env.py`)
-- **Differential Sharpe Ratio** reward (Moody & Saffell 1998).
-- **Quadratic drawdown penalty** beyond 2%.
+- **Differential Sharpe Ratio** reward (Moody & Saffell 1998) with reduced 1.0x scale.
+- **Incremental Drawdown Penalty:** Triggers only on new peak drawdowns > 5% to prevent the "Rational Cowardice" death spiral.
+- **Execution:** Precise Binance VIP 0 Taker fees (0.05%) + realistic volatility-scaled slippage (0.015%).
 - **Liquidation** at 50% equity loss (margin call simulation).
 - **5-dim account state:** pos_frac, unrealized_pct, free_margin, drawdown, steps_since_trade.
 
@@ -46,17 +48,18 @@ graph TD;
 - **Conv1D × 2** (k=3, 64ch): local candlestick pattern extraction.
 - **LSTM × 2** (128 hidden): temporal regime tracking.
 - **LayerNorm + Dropout(0.1):** regularization for noisy financial data.
-- **Orthogonal Init + forget-gate bias=1:** PPO convergence best practice.
+- **Orthogonal Init + forget-gate bias=1.0:** PPO convergence best practice.
 
 ### ✅ Training (`train/train_ppo_spa.py`)
-- PPO with `gamma=0.995`, `ent_coef=0.02`, linear LR decay `3e-4→0`.
-- Train env: DD penalty ON, shaping ON.
-- Eval env: all shaping OFF (clean measurement).
-- No data leak: norm stats computed from training split only.
+- **LSTM-Safe Optimizations:** `ent_coef=0.01` (prevents 100% flat entropy collapse), `LR=1e-4`, `max_grad_norm=0.5`.
+- **Mini-batch Variance:** `batch_size=256` vs `n_steps=4096` guarantees 16 distinct updates per collection phase.
+- **Pure PnL Learning:** Zero action-masking limits (deadband, inactivity penalty) during training.
+- **Cross-Platform:** OS-aware multiprocessing (`fork` on Linux cluster, `spawn` on Windows).
+- **H100 Ready:** Scaled to 12 parallel environments (`--n_envs=12`) for high-throughput GPU saturation.
 
 ### ✅ Evaluation (`eval/`)
-- **Academic Report** (`academic_report.py`): Agent vs B&H, Underwater, Monthly Heatmap, Train vs Test Sharpe.
-- **Institutional Tearsheet** (`institutional_tearsheet.py`): VaR/CVaR, Monte Carlo permutation test, Alpha-Beta decomposition, capacity estimation.
+- **Academic Report** (`academic_report.py`): Agent vs BTC B&H vs S&P 500 (^GSPC), Underwater, Monthly Heatmap, Train vs Test Sharpe. Includes auto S&P 500 data fetch and alignment via `yfinance`.
+- **Institutional Tearsheet** (`institutional_tearsheet.py`): VaR/CVaR, Alpha-Beta decomposition, capacity estimation, and mathematically rigorous **Bootstrap Resampling (with replacement)** for Sharpe p-value significance tests.
 
 ### ✅ Live Trading (`live/paper_trader.py`)
 - **CCXT** for Binance Futures data.

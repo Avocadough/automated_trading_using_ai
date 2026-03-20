@@ -12,7 +12,7 @@ graph TD;
     B --> C[optimize_spa_ga.py]
     C -->|Walk-Forward GA| D[make_features_spa.py]
     B --> D
-    D -->|19 Stationary Features| E[CryptoTradingEnv]
+    D -->|23 Stationary Features| E[CryptoTradingEnv]
     E -->|Diff Sharpe + DD Penalty| F[train_ppo_spa.py]
     F -->|CNN+LSTM PPO Model| G[eval_ppo_spa.py]
     G --> H[Academic Report PDF]
@@ -29,23 +29,24 @@ graph TD;
 | LayerNorm + Dropout(0.1) | Prevent overfitting on noisy crypto data |
 | Orthogonal Init | PPO convergence stability (Andrychowicz 2020) |
 
-### 📊 Feature Engineering (19 Features, All Stationary)
+### 📊 Feature Engineering (23 Features, All Stationary & Bounded)
 - **Returns:** `log_ret_1`, `momentum_5/10/24`
-- **Volatility:** `rvol_20/50`, `vol_regime`, `ATR_pct`, `BB_width/position`
-- **Momentum:** `RSI_14` [-1,1], `MACD_norm`, `close_z_60`, `stoch_k/d` [-1,1]
-- **Volume:** `vol_ratio`, `vol_direction`
+- **Volatility:** Bounded `rvol_20/50` [0, 0.5], `vol_regime`, `ATR_pct`, `BB_width/position`
+- **Momentum:** `RSI_14` [-1,1], `MACD_norm`, `MACD_hist_atr`, `close_z_60`, `stoch_k/d` [-1,1]
+- **Trend:** `ADX_14` [-1,1], `ema_dist_50` (±0.3), `ema_dist_200` (±0.5)
+- **Volume:** Symmetrically clipped `vol_ratio` [-3,3], `vol_direction` [-3,3]
 - **SPA:** `spa_sig` {-1,0,1}, `spa_dist` (normalized boundary distance)
 
 ### 🛡️ Environment Design
 - **Reward:** Differential Sharpe Ratio (Moody & Saffell 1998)
-- **Drawdown:** Quadratic penalty > 2%, liquidation at -50%
+- **Drawdown:** Soft quadratic penalty kicking in at > 5% (Tolerance Zone), liquidation at -50%
 - **Account State:** 5-dim (pos_frac, unrealized_pct, free_margin, drawdown, steps_since_trade)
-- **Fees/Slippage:** 0.05% taker + volatility-scaled slippage
+- **Fees/Slippage:** 0.05% Binance VIP 0 taker + 0.015% base slippage
 
 ### 📋 Dual Evaluation Suite
 | Report | Audience | Contents |
 |---|---|---|
-| Academic Report | Thesis Committee | Agent vs B&H, Monthly Heatmap, Train/Test Sharpe |
+| Academic Report | Thesis Committee | Agent vs BTC B&H vs S&P 500, Monthly Heatmap, Train/Test Sharpe |
 | Institutional Tearsheet | Hedge Fund DD | VaR/CVaR, Monte Carlo p-value, Alpha-Beta, Capacity |
 
 ---
@@ -55,7 +56,7 @@ graph TD;
 ```
 src/
 ├── data_ingest/    # Binance API downloader
-├── features/       # 19-feature stationary pipeline + stationarity audit
+├── features/       # 23-feature stationary pipeline + stationarity audit
 ├── optimize/       # Walk-Forward Validated GA for SPA parameters
 ├── spa/            # Self-Adjusting Price Action core math
 ├── models/         # CNN+LSTM custom PyTorch architecture

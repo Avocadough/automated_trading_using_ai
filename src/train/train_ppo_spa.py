@@ -18,14 +18,20 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMoni
 from stable_baselines3.common.callbacks import EvalCallback
 from typing import Callable
 
-def linear_schedule(initial_value: float) -> Callable[[float], float]:
+def linear_schedule(initial_value: float, min_value: float = 0.0) -> Callable[[float], float]:
     """
-    Linear learning rate schedule.
-    :param initial_value: Initial learning rate.
-    :return: schedule that computes current learning rate depending on remaining progress
+    Linear learning rate schedule with a minimum floor.
+    Decays from `initial_value` → `min_value` as training progresses.
+    When min_value > 0, the network never fully freezes — critical for
+    preventing late-stage "brain death" where the agent can't adapt.
+
+    :param initial_value: Starting learning rate.
+    :param min_value: Minimum learning rate floor (default 0.0 for backward compat).
+    :return: callable schedule for SB3.
     """
     def func(progress_remaining: float) -> float:
-        return progress_remaining * initial_value
+        # progress_remaining goes from 1.0 → 0.0 during training
+        return max(min_value, progress_remaining * initial_value)
 
     return func
 
@@ -146,15 +152,15 @@ def main(
     train_split: float = 0.8,
     device_arg: str | None = None,
     n_envs: int = 8,
-    # ---- shaping knobs ----
+    # ---- shaping knobs (all zeroed: agent learns raw PnL, no action masking) ----
     flat_penalty_bps: float = 0.0,
     inactivity_steps: int = 256,
-    inactivity_penalty_bps: float = 1.0,
+    inactivity_penalty_bps: float = 0.0,   # FIX: was 1.0 — masked exploration
     turnover_reward_coeff: float = 0.0,
-    trade_threshold: float = 0.01,
-    deadband_frac: float = 0.05,
+    trade_threshold: float = 0.0,           # FIX: was 0.01 — deadband on actions
+    deadband_frac: float = 0.0,             # FIX: was 0.05 — deadband on actions
     min_hold_steps: int = 0,
-    cooldown_steps: int = 3,
+    cooldown_steps: int = 0,                # FIX: was 3 — forced inaction
 ):
     set_global_seeds(seed)
 
@@ -278,19 +284,31 @@ def main(
         seed=seed,
         tensorboard_log="./ppo_logs_spa/",
         # --- On-policy buffer ---
-        n_steps=2048,
-        batch_size=512,    # 2048/512 = 4 mini-batches per update (gradient variance)
+        # FIX: n_steps 2048→4096 — LSTM needs longer horizon for BPTT
+        n_steps=4096,
+        # FIX: batch_size 512→256 — reduce gradient variance for recurrent updates
+        batch_size=256,        # 4096/256 = 16 mini-batches per update
         n_epochs=10,
-        # --- Learning rate (linear decay 5e-5 → 0) ---
-        learning_rate=linear_schedule(5e-5),     # LSTM-safe: 3e-4 kills recurrent neurons
+        # --- Learning rate (linear decay 1e-4 → 1e-5, never hits zero) ---
+        # FIX: LR decaying to 0.0 caused "brain freeze" — weights locked and
+        # the agent couldn't adapt in late training. Floor of 1e-5 keeps the
+        # network plastic enough for late-stage fine-tuning.
+        learning_rate=linear_schedule(1e-4, min_value=1e-5),
         # --- Discount & GAE ---
         gamma=0.995,           # ~200 steps lookahead = ~8 days @ 1H
         gae_lambda=0.95,
         # --- Policy gradient ---
-        ent_coef=0.03,         # Higher entropy → more exploration across all 3 actions
+        # FIX: ent_coef 0.001 → 0.01 — "Rational Cowardice" fix.
+        # At 0.001 the agent immediately collapsed to 100% Flat (action=1)
+        # to avoid trading fees → 0% return. At 0.01 there's enough entropy
+        # pressure to maintain exploration, but not so much that the policy
+        # stays random (which happened at 0.03). This is the sweet spot.
+        ent_coef=0.01,
         clip_range=0.20,
         vf_coef=0.5,
-        max_grad_norm=0.3,     # Tighter clipping for 2-layer LSTM stability
+        # FIX: max_grad_norm 0.3 → 0.5 — standard LSTM gradient clipping value;
+        # 0.3 was too tight and starved recurrent weight updates.
+        max_grad_norm=0.5,
         # --- CNN+LSTM policy ---
         policy_kwargs=custom_policy_kwargs,
     )
@@ -334,15 +352,15 @@ if __name__ == "__main__":
     ap.add_argument("--device",           type=str, default="cuda", choices=["cpu", "cuda", "auto"])
     ap.add_argument("--n_envs",           type=int, default=12, help="Number of parallel environments")
 
-    # shaping knobs
-    ap.add_argument("--flat_penalty_bps",       type=float, default=1.0)
-    ap.add_argument("--inactivity_steps",       type=int,   default=24)
-    ap.add_argument("--inactivity_penalty_bps", type=float, default=1.0)
+    # shaping knobs — all zeroed by default so agent learns raw PnL dynamics
+    ap.add_argument("--flat_penalty_bps",       type=float, default=0.0)
+    ap.add_argument("--inactivity_steps",       type=int,   default=256)
+    ap.add_argument("--inactivity_penalty_bps", type=float, default=0.0)  # FIX: was 1.0
     ap.add_argument("--turnover_reward_coeff",  type=float, default=0.0)
-    ap.add_argument("--trade_threshold",        type=float, default=0.01)
-    ap.add_argument("--deadband_frac",          type=float, default=0.05)
+    ap.add_argument("--trade_threshold",        type=float, default=0.0)  # FIX: was 0.01
+    ap.add_argument("--deadband_frac",          type=float, default=0.0)  # FIX: was 0.05
     ap.add_argument("--min_hold_steps",         type=int,   default=0)
-    ap.add_argument("--cooldown_steps",         type=int,   default=3)
+    ap.add_argument("--cooldown_steps",         type=int,   default=0)    # FIX: was 3
 
     args = ap.parse_args()
 

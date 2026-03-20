@@ -177,12 +177,11 @@ class CryptoTradingEnv(gym.Env):
         self.last_close = 0.0
         self.n_trades = 0
 
-        # Differential Sharpe EMA state
-        self._ema_ret = 0.0          # EMA of returns (A_t)
-        self._ema_ret_sq = 0.0       # EMA of squared returns (B_t)
-
         # Rolling returns buffer for reward Sharpe
         self._return_buffer: List[float] = []
+        
+        # Max session drawdown tracker for incremental penalty
+        self._max_session_dd = 0.0
 
         self.reset()
 
@@ -326,12 +325,17 @@ class CryptoTradingEnv(gym.Env):
 
         reward = self.reward_scale * diff_sharpe
 
-        # ---------- Component 2: Drawdown Penalty ----------
+        # ---------- Component 2: Incremental Drawdown Penalty ----------
+        # Instead of punishing the agent every single step it remains in a drawdown (which causes 
+        # the "play dead" death spiral), we only punish it when it makes a NEW high in drawdown.
         if self.drawdown_penalty_coeff > 0 and self.equity_peak > 0:
-            dd = 1.0 - (equity / self.equity_peak)
-            if dd > 0.05:  # Tolerance zone: only penalize drawdown beyond 5% (market noise)
-                # Shifted quadratic penalty: Softens the curve so 6% DD is small, 10% DD is severe
-                reward -= self.drawdown_penalty_coeff * self.reward_scale * ((dd - 0.05) ** 2)
+            current_dd = 1.0 - (equity / self.equity_peak)
+            # Only penalize if we've breached the 5% tolerance AND we are at a new worst DD
+            if current_dd > 0.05 and current_dd > self._max_session_dd:
+                dd_delta = current_dd - max(self._max_session_dd, 0.05)
+                # Scale up naturally to match the magnitude of the old quadratic penalty during a drop
+                reward -= self.drawdown_penalty_coeff * self.reward_scale * (dd_delta * 10.0)
+                self._max_session_dd = current_dd
 
         # ---------- Component 3: Optional Shaping ----------
         # Flat penalty: discourage sitting flat when market is moving
@@ -385,6 +389,9 @@ class CryptoTradingEnv(gym.Env):
         self._ema_ret = 0.0
         self._ema_ret_sq = 1e-6  # small initial variance to avoid div-by-zero
         self._return_buffer = []
+
+        # Reset session drawdown tracker
+        self._max_session_dd = 0.0
 
         obs = self._build_obs()
         info = {"equity": self.equity, "position_frac": 0.0}
