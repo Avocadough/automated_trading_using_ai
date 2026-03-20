@@ -232,7 +232,7 @@ class CnnLstmFeaturesExtractor(BaseFeaturesExtractor):
 # ============================================================
 def get_policy_kwargs(
     observation_space: gym.spaces.Box | None = None,
-    features_dim: int = 128,
+    features_dim: int = 64,
     pi_layers: list[int] | None = None,
     vf_layers: list[int] | None = None,
 ) -> Dict:
@@ -241,27 +241,27 @@ def get_policy_kwargs(
 
     The feature extractor processes the (window, features) observation
     into a flat vector, which then feeds into:
-      - Policy head (pi): [128] → action logits
-      - Value head (vf):  [128] → scalar value estimate
+      - Policy head (pi): [64] → action logits
+      - Value head (vf):  [64] → scalar value estimate
 
     Usage:
         model = PPO("MlpPolicy", env, policy_kwargs=get_policy_kwargs())
     """
     if pi_layers is None:
-        pi_layers = [128]
+        pi_layers = [64]
     if vf_layers is None:
-        vf_layers = [128]
+        vf_layers = [64]
 
     return dict(
         features_extractor_class=CnnLstmFeaturesExtractor,
         features_extractor_kwargs=dict(
             features_dim=features_dim,
-            cnn_channels=64,
+            cnn_channels=32,
             cnn_kernel=3,
-            lstm_hidden=128,
-            lstm_layers=2,
-            lstm_dropout=0.1,
-            dropout=0.1,
+            lstm_hidden=32,
+            lstm_layers=1,
+            lstm_dropout=0.0,
+            dropout=0.3,
         ),
         net_arch=dict(pi=pi_layers, vf=vf_layers),
         # SB3 uses ortho init internally for pi/vf heads,

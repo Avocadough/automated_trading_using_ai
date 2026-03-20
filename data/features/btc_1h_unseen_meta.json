@@ -1,0 +1,40 @@
+{
+  "features": [
+    "log_ret_1",
+    "momentum_5",
+    "momentum_10",
+    "momentum_24",
+    "rvol_20",
+    "rvol_50",
+    "vol_regime",
+    "ATR_pct",
+    "BB_width",
+    "BB_position",
+    "RSI_14",
+    "MACD_norm",
+    "MACD_hist_atr",
+    "close_z_60",
+    "stoch_k",
+    "stoch_d",
+    "ADX_14",
+    "ema_dist_50",
+    "ema_dist_200",
+    "vol_ratio",
+    "vol_direction",
+    "spa_sig",
+    "spa_dist"
+  ],
+  "window_size": 64,
+  "freq_hint": "unknown",
+  "periods_per_year": 8760,
+  "train_split": 1.0,
+  "rows": 10452,
+  "source": "data\\raw\\btc_1h_unseen.parquet",
+  "spa_params": {
+    "d": 55,
+    "alpha": 2.0,
+    "gamma": 2.0,
+    "m_ma": 8,
+    "source": "close"
+  }
+}

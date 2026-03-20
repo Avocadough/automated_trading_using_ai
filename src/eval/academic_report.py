@@ -107,12 +107,30 @@ def compute_metrics(
     # Alpha (outperformance vs BTC Buy & Hold)
     alpha = total_return - bm_total_return
 
-    # S&P 500 total return (optional)
+    # Benchmark Sharpe & Sortino (BTC Buy & Hold)
+    bm_ann_vol = np.std(bm_returns, ddof=1) * np.sqrt(periods_per_year) if len(bm_returns) > 1 else 0.0
+    bm_ann_return = ((1 + bm_total_return) ** (1 / max(years, 1e-6)) - 1) if bm_total_return > -1 else 0.0
+    bm_sharpe = bm_ann_return / bm_ann_vol if bm_ann_vol > 1e-12 else 0.0
+    bm_downside = bm_returns[bm_returns < 0]
+    bm_downside_std = np.std(bm_downside, ddof=1) * np.sqrt(periods_per_year) if len(bm_downside) > 1 else 0.0
+    bm_sortino = bm_ann_return / bm_downside_std if bm_downside_std > 1e-12 else 0.0
+
+    # S&P 500 Sharpe & Sortino (optional)
+    sp500_sharpe: Optional[float] = None
+    sp500_sortino: Optional[float] = None
     sp500_total_return: Optional[float] = None
     alpha_vs_sp500: Optional[float] = None
     if sp500_equity is not None and len(sp500_equity) > 1:
         sp500_total_return = float((sp500_equity[-1] / sp500_equity[0]) - 1.0)
         alpha_vs_sp500 = total_return - sp500_total_return
+        sp_returns = np.diff(sp500_equity) / sp500_equity[:-1]
+        sp_returns = np.nan_to_num(sp_returns, nan=0.0, posinf=0.0, neginf=0.0)
+        sp_ann_return = ((1 + sp500_total_return) ** (1 / max(years, 1e-6)) - 1) if sp500_total_return > -1 else 0.0
+        sp_ann_vol = np.std(sp_returns, ddof=1) * np.sqrt(periods_per_year) if len(sp_returns) > 1 else 0.0
+        sp500_sharpe = sp_ann_return / sp_ann_vol if sp_ann_vol > 1e-12 else 0.0
+        sp_downside = sp_returns[sp_returns < 0]
+        sp_downside_std = np.std(sp_downside, ddof=1) * np.sqrt(periods_per_year) if len(sp_downside) > 1 else 0.0
+        sp500_sortino = sp_ann_return / sp_downside_std if sp_downside_std > 1e-12 else 0.0
 
     return {
         "total_return": total_return,
@@ -124,6 +142,10 @@ def compute_metrics(
         "annualized_volatility": ann_vol,
         "sharpe_ratio": sharpe,
         "sortino_ratio": sortino,
+        "bm_sharpe": bm_sharpe,
+        "bm_sortino": bm_sortino,
+        "sp500_sharpe": sp500_sharpe,
+        "sp500_sortino": sp500_sortino,
         "max_drawdown": max_dd,
         "win_rate": win_rate,
         "profit_factor": profit_factor,
@@ -453,6 +475,16 @@ class AcademicReport:
                 ["Annualized Volatility", f'{metrics["annualized_volatility"]*100:.2f}%'],
                 ["Sharpe Ratio (OOS)", f'{metrics["sharpe_ratio"]:.3f}'],
                 ["Sortino Ratio", f'{metrics["sortino_ratio"]:.3f}'],
+                ["", ""],
+                ["BENCHMARK SHARPE / SORTINO", ""],
+                ["BTC Buy & Hold Sharpe", f'{metrics["bm_sharpe"]:.3f}'],
+                ["BTC Buy & Hold Sortino", f'{metrics["bm_sortino"]:.3f}'],
+            ]
+            if metrics.get("sp500_sharpe") is not None:
+                table_data.append(["S&P 500 Sharpe", f'{metrics["sp500_sharpe"]:.3f}'])
+                table_data.append(["S&P 500 Sortino", f'{metrics["sp500_sortino"]:.3f}'])
+            table_data += [
+                ["", ""],
                 ["Max Drawdown", f'{metrics["max_drawdown"]*100:.2f}%'],
                 ["Win Rate", f'{metrics["win_rate"]*100:.1f}%'],
                 ["Profit Factor", f'{metrics["profit_factor"]:.3f}'],
@@ -519,6 +551,14 @@ class AcademicReport:
                 print(f"  Degradation         : {deg:.0f}% {verdict}")
             else:
                 print(f"  Degradation         : N/A (train Sharpe ≈ 0)")
+
+        # Benchmark Sharpe / Sortino
+        print(f"  —")
+        print(f"  BTC B&H Sharpe      : {metrics['bm_sharpe']:.3f}")
+        print(f"  BTC B&H Sortino     : {metrics['bm_sortino']:.3f}")
+        if metrics.get("sp500_sharpe") is not None:
+            print(f"  S&P 500 Sharpe      : {metrics['sp500_sharpe']:.3f}")
+            print(f"  S&P 500 Sortino     : {metrics['sp500_sortino']:.3f}")
 
         # Dual verdict: vs BTC and vs S&P 500
         winner_btc = "AGENT ✅" if metrics["alpha"] > 0 else "BUY & HOLD ❌"

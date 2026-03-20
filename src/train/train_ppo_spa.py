@@ -286,9 +286,9 @@ def main(
         # --- On-policy buffer ---
         # FIX: n_steps 2048→4096 — LSTM needs longer horizon for BPTT
         n_steps=4096,
-        # FIX: batch_size 512→256 — reduce gradient variance for recurrent updates
-        batch_size=256,        # 4096/256 = 16 mini-batches per update
-        n_epochs=10,
+        # FIX: batch_size 256→512 — reduce gradient variance for recurrent updates
+        batch_size=512,        # 4096/512 = 8 mini-batches per update
+        n_epochs=5,
         # --- Learning rate (linear decay 1e-4 → 1e-5, never hits zero) ---
         # FIX: LR decaying to 0.0 caused "brain freeze" — weights locked and
         # the agent couldn't adapt in late training. Floor of 1e-5 keeps the

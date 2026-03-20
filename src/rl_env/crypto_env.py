@@ -79,6 +79,10 @@ class CryptoTradingEnv(gym.Env):
         # ---- Differential Sharpe ----
         sharpe_window: int = 48,          # Rolling window for reward Sharpe computation
         sharpe_eta: float = 0.01,         # EMA decay for differential Sharpe (η)
+        # ---- Dynamic Action Masking (Trend Filter) ----
+        trend_mask_threshold: float = 0.03, # Prevent counter-trend actions if EMA dist > 3%
+        # ---- Trend-Alignment Reward Boost ----
+        trend_align_bonus: float = 2.0,     # Multiplier for trend-aligned profitable steps
     ):
         super().__init__()
 
@@ -162,6 +166,14 @@ class CryptoTradingEnv(gym.Env):
 
         # ---------- Precompute close prices as numpy for speed ----------
         self._close_arr = self.df["close"].values.astype("float64")
+
+        # ---- Dynamic Action Masking Array ----
+        self.trend_mask_threshold = float(trend_mask_threshold)
+        self.trend_align_bonus = float(trend_align_bonus)
+        if "ema_dist_200" in self.df.columns:
+            self._ema_dist_200_arr = self.df["ema_dist_200"].to_numpy(dtype=np.float32)
+        else:
+            self._ema_dist_200_arr = None
 
         # ---------- Initialize state ----------
         self.current_step = 0
@@ -270,6 +282,33 @@ class CryptoTradingEnv(gym.Env):
     # ================================================================
     # Action Mapping
     # ================================================================
+
+    def _apply_trend_mask(self, action: int | np.ndarray) -> int | np.ndarray:
+        """
+        Dynamically mask counter-trend actions in strong macro regimes using
+        the pure, unscaled ema_dist_200 feature.
+        If Bull (ema_dist > +5%), forbid Short (0). Map to Flat (1).
+        If Bear (ema_dist < -5%), forbid Long (2). Map to Flat (1).
+        """
+        if self._ema_dist_200_arr is None:
+            return action
+
+        # CRITICAL FIX: The neural network decided this action at t (current_step - 1)
+        # We must mask it using the exact same causal information state to prevent a 1-bar lookahead bias!
+        ema_dist = self._ema_dist_200_arr[self.current_step - 1]
+
+        if self.action_mode == "discrete":
+            if ema_dist > self.trend_mask_threshold and action == 0:
+                return 1  # Force flat instead of short
+            elif ema_dist < -self.trend_mask_threshold and action == 2:
+                return 1  # Force flat instead of long
+        else:
+            if ema_dist > self.trend_mask_threshold and action[0] < 0:
+                return np.array([0.0], dtype=np.float32)
+            elif ema_dist < -self.trend_mask_threshold and action[0] > 0:
+                return np.array([0.0], dtype=np.float32)
+
+        return action
 
     def _map_action_to_target_frac(self, action) -> float:
         """Map raw action → target position fraction."""
@@ -408,6 +447,9 @@ class CryptoTradingEnv(gym.Env):
         unrealized_prev = self.qty * (prev_price - self.avg_entry)
         equity_before = float(max(self.balance + unrealized_prev, 1e-12))
 
+        # ---- Dynamic Action Masking (Trend Filter) ----
+        action = self._apply_trend_mask(action)
+
         # ---- Map action → target position fraction ----
         target_frac = self._map_action_to_target_frac(action)
         desired_notional = equity_before * target_frac
@@ -482,6 +524,32 @@ class CryptoTradingEnv(gym.Env):
 
         # ---- Compute reward ----
         reward = self._compute_reward(step_return, turnover, equity_after)
+
+        # ---- Trend-Alignment Reward Boost ----
+        # Incentivise the agent to ride macro trends instead of sitting Flat.
+        # Uses the CAUSAL ema_dist_200 at (current_step - 1) — the same
+        # information state available when the action was decided.
+        # Only fires when:
+        #   1. The position is ALIGNED with the macro trend, AND
+        #   2. The step produced a POSITIVE return (profitable trade).
+        # This avoids rewarding random trend-aligned entries that lose money.
+        if (
+            self._ema_dist_200_arr is not None
+            and self.trend_align_bonus > 1.0
+            and step_return > 0
+        ):
+            causal_ema_dist = float(self._ema_dist_200_arr[self.current_step - 1])
+
+            if self.action_mode == "discrete":
+                # action has already been masked at this point
+                is_bull_aligned = causal_ema_dist > 0 and action == 2   # Long in Bull
+                is_bear_aligned = causal_ema_dist < 0 and action == 0   # Short in Bear
+            else:
+                is_bull_aligned = causal_ema_dist > 0 and float(action[0]) > 0
+                is_bear_aligned = causal_ema_dist < 0 and float(action[0]) < 0
+
+            if is_bull_aligned or is_bear_aligned:
+                reward *= self.trend_align_bonus
 
         # ---- Update state ----
         self.total_reward += reward

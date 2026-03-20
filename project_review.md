@@ -40,26 +40,28 @@ graph TD;
 ### ✅ RL Environment (`rl_env/crypto_env.py`)
 - **Differential Sharpe Ratio** reward (Moody & Saffell 1998) with reduced 1.0x scale.
 - **Incremental Drawdown Penalty:** Triggers only on new peak drawdowns > 5% to prevent the "Rational Cowardice" death spiral.
-- **Execution:** Precise Binance VIP 0 Taker fees (0.05%) + realistic volatility-scaled slippage (0.015%).
+- **Dynamic Trend Masking:** Causal action interception (at `t`) strictly forbids Shorts when Price > 3% vs EMA200, and Longs when < -3%.
+- **Trend-Alignment Reward Boost:** 2.0x reward multiplier for profitable trend-aligned positions. Cures "Volatility Fear" regime bias.
+- **Execution:** Precise Binance VIP 0 Taker fees (0.05%) + realistic volatility-scaled slippage (0.015%). Position limit at 50% of equity for improved capital efficiency.
 - **Liquidation** at 50% equity loss (margin call simulation).
 - **5-dim account state:** pos_frac, unrealized_pct, free_margin, drawdown, steps_since_trade.
 
 ### ✅ Neural Architecture (`models/custom_policy.py`)
-- **Conv1D × 2** (k=3, 64ch): local candlestick pattern extraction.
-- **LSTM × 2** (128 hidden): temporal regime tracking.
-- **LayerNorm + Dropout(0.1):** regularization for noisy financial data.
+- **Conv1D × 2** (k=3, 32ch): local candlestick pattern extraction.
+- **LSTM × 1** (32 hidden): temporal regime tracking. Shrunk from 262k → 16k params to cure massive OOS degradation.
+- **LayerNorm + Dropout(0.3):** strong regularization for noisy financial data.
 - **Orthogonal Init + forget-gate bias=1.0:** PPO convergence best practice.
 
 ### ✅ Training (`train/train_ppo_spa.py`)
 - **LSTM-Safe Optimizations:** `ent_coef=0.01` (prevents 100% flat entropy collapse), `LR=1e-4`, `max_grad_norm=0.5`.
-- **Mini-batch Variance:** `batch_size=256` vs `n_steps=4096` guarantees 16 distinct updates per collection phase.
+- **Mini-batch Variance:** `batch_size=512` vs `n_steps=4096` and `n_epochs=5` to prevent per-batch curve fitting.
 - **Pure PnL Learning:** Zero action-masking limits (deadband, inactivity penalty) during training.
 - **Cross-Platform:** OS-aware multiprocessing (`fork` on Linux cluster, `spawn` on Windows).
-- **H100 Ready:** Scaled to 12 parallel environments (`--n_envs=12`) for high-throughput GPU saturation.
+- **Local Training Ready:** Scaled parallel environments (`--n_envs`) to maximize local CPU/GPU throughput.
 
 ### ✅ Evaluation (`eval/`)
-- **Academic Report** (`academic_report.py`): Agent vs BTC B&H vs S&P 500 (^GSPC), Underwater, Monthly Heatmap, Train vs Test Sharpe. Includes auto S&P 500 data fetch and alignment via `yfinance`.
-- **Institutional Tearsheet** (`institutional_tearsheet.py`): VaR/CVaR, Alpha-Beta decomposition, capacity estimation, and mathematically rigorous **Bootstrap Resampling (with replacement)** for Sharpe p-value significance tests.
+- **Academic Report** (`academic_report.py`): Agent vs BTC B&H vs S&P 500 (^GSPC), Underwater, Monthly Heatmap, Train vs Test Sharpe. Includes auto S&P 500 data fetch and alignment via `yfinance`. **Benchmark Sharpe/Sortino comparison** for Agent, BTC B&H, and S&P 500.
+- **Institutional Tearsheet** (`institutional_tearsheet.py`): VaR/CVaR, Alpha-Beta decomposition, capacity estimation, and mathematically rigorous **Bootstrap Resampling (with replacement)** for Sharpe p-value significance tests. **S&P 500 equity line** on equity chart and **Benchmark Comparison** section on Page 3.
 
 ### ✅ Live Trading (`live/paper_trader.py`)
 - **CCXT** for Binance Futures data.
@@ -71,9 +73,9 @@ graph TD;
 
 ## 3. Remaining Steps
 
-### 🟢 Priority 1: Train on H100
+### 🟢 Priority 1: Train (Local)
 ```bash
-sbatch train_ppo_spa.sh    # 5M steps ≈ 6h on H100
+python src/train/train_ppo_spa.py    # 5M steps local
 ```
 
 ### 🟢 Priority 2: Evaluate & Generate Reports

@@ -371,6 +371,9 @@ class InstitutionalTearsheet:
         capacity: Dict,
         output_path: Path,
         periods_per_year: int = 8760,
+        sp500_equity: Optional[np.ndarray] = None,
+        bm_risk: Optional[RiskAnalytics] = None,
+        sp_risk: Optional[RiskAnalytics] = None,
     ):
         """Generate the complete multi-page PDF tearsheet."""
         plt.style.use("dark_background")
@@ -392,7 +395,7 @@ class InstitutionalTearsheet:
 
             self._plot_header(fig, risk, ab_decomp, stat_val, capacity)
             self._plot_equity_curve(fig.add_subplot(gs[1, :]), equity,
-                                    benchmark_equity)
+                                    benchmark_equity, sp500_equity)
             self._plot_underwater(fig.add_subplot(gs[2, :]), returns)
             self._plot_rolling_sharpe(fig.add_subplot(gs[3, :]), returns,
                                       periods_per_year)
@@ -416,7 +419,9 @@ class InstitutionalTearsheet:
 
             # ---- PAGE 3: Risk Metrics Table ----
             fig = plt.figure(figsize=(16, 12))
-            self._plot_metrics_table(fig, risk, ab_decomp, stat_val, capacity)
+            self._plot_metrics_table(fig, risk, ab_decomp, stat_val, capacity,
+                                     bm_risk=bm_risk,
+                                     sp_risk=sp_risk)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -446,8 +451,9 @@ class InstitutionalTearsheet:
         fig.text(0.5, 0.94, metrics_text, ha="center", fontsize=10,
                  color=self.COLORS["fg"], fontfamily="monospace")
 
-    def _plot_equity_curve(self, ax, equity, benchmark_equity):
-        """Log-scale equity curve vs benchmark (Buy & Hold)."""
+    def _plot_equity_curve(self, ax, equity, benchmark_equity,
+                           sp500_equity=None):
+        """Log-scale equity curve vs benchmark (Buy & Hold) + S&P 500."""
         n = min(len(equity), len(benchmark_equity))
         eq = equity[:n]
         bm = benchmark_equity[:n]
@@ -456,6 +462,14 @@ class InstitutionalTearsheet:
                     label="Strategy", alpha=0.9)
         ax.semilogy(bm, color=self.COLORS["danger"], linewidth=1.0,
                     label="Buy & Hold BTC", alpha=0.7)
+
+        # S&P 500 third line
+        if sp500_equity is not None and len(sp500_equity) > 1:
+            sp_n = min(n, len(sp500_equity))
+            ax.semilogy(sp500_equity[:sp_n], color=self.COLORS["warning"],
+                        linewidth=1.0, linestyle=":",
+                        label="S&P 500", alpha=0.8)
+
         ax.fill_between(range(n), eq, bm,
                         where=eq > bm,
                         color=self.COLORS["accent2"], alpha=0.1,
@@ -464,7 +478,8 @@ class InstitutionalTearsheet:
                         where=eq < bm,
                         color=self.COLORS["danger"], alpha=0.1)
 
-        ax.set_title("Equity Curve (Log Scale) vs. Benchmark",
+        title_suffix = " & S&P 500" if sp500_equity is not None else ""
+        ax.set_title(f"Equity Curve (Log Scale) vs. Benchmark{title_suffix}",
                      color=self.COLORS["fg"], fontweight="bold")
         ax.set_ylabel("Equity ($)", color=self.COLORS["fg"])
         ax.legend(loc="upper left", fontsize=8)
@@ -680,7 +695,8 @@ class InstitutionalTearsheet:
         ax.set_ylabel("Return (%)", color=self.COLORS["fg"])
         ax.tick_params(colors=self.COLORS["fg"])
 
-    def _plot_metrics_table(self, fig, risk, ab_decomp, stat_val, capacity):
+    def _plot_metrics_table(self, fig, risk, ab_decomp, stat_val, capacity,
+                            bm_risk=None, sp_risk=None):
         """Full metrics table — Page 3."""
         fig.suptitle("QUANTITATIVE RISK METRICS — FULL DETAIL",
                      fontsize=14, fontweight="bold",
@@ -698,6 +714,24 @@ class InstitutionalTearsheet:
             ["Omega Ratio (θ=0)", risk.to_dict()["Omega Ratio (θ=0)"]],
             ["Profit Factor", risk.to_dict()["Profit Factor"]],
             ["Win Rate", risk.to_dict()["Win Rate"]],
+            ["", ""],
+            ["BENCHMARK COMPARISON", ""],
+        ]
+        if bm_risk is not None:
+            perf_data += [
+                ["BTC Buy & Hold Sharpe", f"{bm_risk.sharpe_ratio():.3f}"],
+                ["BTC Buy & Hold Sortino", f"{bm_risk.sortino_ratio():.3f}"],
+                ["BTC Buy & Hold Max DD", f"{bm_risk.max_drawdown()*100:.2f}%"],
+            ]
+        if sp_risk is not None:
+            perf_data += [
+                ["S&P 500 Sharpe", f"{sp_risk.sharpe_ratio():.3f}"],
+                ["S&P 500 Sortino", f"{sp_risk.sortino_ratio():.3f}"],
+                ["S&P 500 Max DD", f"{sp_risk.max_drawdown()*100:.2f}%"],
+            ]
+        if bm_risk is None and sp_risk is None:
+            perf_data.append(["(Benchmark data not available)", ""])
+        perf_data += [
             ["", ""],
             ["TAIL RISK METRICS", ""],
             ["Max Drawdown", risk.to_dict()["Max Drawdown"]],
@@ -768,6 +802,7 @@ def run_institutional_eval(
     n_trades_count: int = 0,
     output_dir: Path = Path("data/eval"),
     strategy_name: str = "CNN+LSTM PPO Alpha Strategy",
+    sp500_equity: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Complete institutional evaluation pipeline.
@@ -822,6 +857,18 @@ def run_institutional_eval(
     print(f"       R²: {ab_decomp['r_squared']:.4f} "
           f"(low = uncorrelated with BTC)")
 
+    # ---- 3b. Benchmark RiskAnalytics (for table on Page 3) ----
+    bm_risk = RiskAnalytics(bm_returns, periods_per_year)
+    sp_risk = None
+    if sp500_equity is not None and len(sp500_equity) > 1:
+        sp_rets = np.diff(sp500_equity) / sp500_equity[:-1]
+        sp_rets = np.nan_to_num(sp_rets, nan=0.0, posinf=0.0, neginf=0.0)
+        sp_risk = RiskAnalytics(sp_rets, periods_per_year)
+        print(f"[eval] S&P 500 Sharpe: {sp_risk.sharpe_ratio():.3f}, "
+              f"Sortino: {sp_risk.sortino_ratio():.3f}")
+    print(f"[eval] BTC B&H Sharpe: {bm_risk.sharpe_ratio():.3f}, "
+          f"Sortino: {bm_risk.sortino_ratio():.3f}")
+
     # ---- 4. Jarque-Bera test ----
     jb_stat, jb_pval = StatisticalValidator.jarque_bera_test(returns)
     print(f"[eval] Jarque-Bera: stat={jb_stat:.1f}, p={jb_pval:.4f} "
@@ -855,6 +902,9 @@ def run_institutional_eval(
         capacity=capacity,
         output_path=pdf_path,
         periods_per_year=periods_per_year,
+        sp500_equity=sp500_equity,
+        bm_risk=bm_risk,
+        sp_risk=sp_risk,
     )
 
     # ---- 7. Print Summary ----

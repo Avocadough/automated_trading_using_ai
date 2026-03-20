@@ -24,9 +24,9 @@ graph TD;
 ### 🧬 Neural Network: CNN + LSTM Feature Extractor
 | Layer | Purpose |
 |---|---|
-| Conv1D × 2 (k=3, 64ch) | Extract local 3-bar candlestick patterns |
-| LSTM × 2 (128 hidden) | Capture temporal regimes & trend persistence |
-| LayerNorm + Dropout(0.1) | Prevent overfitting on noisy crypto data |
+| Conv1D × 2 (k=3, 32ch) | Extract local candlestick patterns |
+| LSTM × 1 (32 hidden) | Capture temporal regimes (Capacity constrained to prevent overfitting) |
+| LayerNorm + Dropout(0.3) | Heavy regularization for noisy crypto data |
 | Orthogonal Init | PPO convergence stability (Andrychowicz 2020) |
 
 ### 📊 Feature Engineering (23 Features, All Stationary & Bounded)
@@ -89,9 +89,9 @@ python src/features/make_features_spa.py \
     --input data/raw/btc_1h.parquet --output data/features/btc_1h_spa.parquet
 ```
 
-### 4. Train (H100 Cluster)
+### 4. Train (Local)
 ```bash
-sbatch train_ppo_spa.sh
+python src/train/train_ppo_spa.py
 ```
 
 ### 5. Evaluate (Academic + Institutional)

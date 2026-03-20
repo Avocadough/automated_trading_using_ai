@@ -294,6 +294,42 @@ def run_eval(model_path: Path, features_path: Path, out_dir: Path):
         periods_per_year=periods_per_year, initial_balance=10_000.0,
         sp500_equity=sp500_equity)
 
+    # ---- Print Benchmark Comparison Table ----
+    from src.eval.institutional_tearsheet import RiskAnalytics
+    _bm_rets = np.diff(bm_equity) / bm_equity[:-1]
+    _bm_rets = np.nan_to_num(_bm_rets, nan=0.0, posinf=0.0, neginf=0.0)
+    _bm_ra = RiskAnalytics(_bm_rets, periods_per_year)
+
+    _sp_ra = None
+    if sp500_equity is not None and len(sp500_equity) > 1:
+        _sp_rets = np.diff(sp500_equity) / sp500_equity[:-1]
+        _sp_rets = np.nan_to_num(_sp_rets, nan=0.0, posinf=0.0, neginf=0.0)
+        _sp_ra = RiskAnalytics(_sp_rets, periods_per_year)
+
+    _ag_ra = RiskAnalytics(returns, periods_per_year)
+    print(f"\n{'='*70}")
+    print(f" BENCHMARK COMPARISON (Out-of-Sample)")
+    print(f"{'='*70}")
+    print(f"  {'Metric':<25s} {'Agent':>12s} {'BTC B&H':>12s}", end="")
+    if _sp_ra: print(f" {'S&P 500':>12s}", end="")
+    print()
+    print(f"  {'-'*25} {'-'*12} {'-'*12}", end="")
+    if _sp_ra: print(f" {'-'*12}", end="")
+    print()
+    print(f"  {'Ann. Return':<25s} {_ag_ra.annualized_return()*100:>11.2f}% {_bm_ra.annualized_return()*100:>11.2f}%", end="")
+    if _sp_ra: print(f" {_sp_ra.annualized_return()*100:>11.2f}%", end="")
+    print()
+    print(f"  {'Sharpe Ratio':<25s} {_ag_ra.sharpe_ratio():>12.3f} {_bm_ra.sharpe_ratio():>12.3f}", end="")
+    if _sp_ra: print(f" {_sp_ra.sharpe_ratio():>12.3f}", end="")
+    print()
+    print(f"  {'Sortino Ratio':<25s} {_ag_ra.sortino_ratio():>12.3f} {_bm_ra.sortino_ratio():>12.3f}", end="")
+    if _sp_ra: print(f" {_sp_ra.sortino_ratio():>12.3f}", end="")
+    print()
+    print(f"  {'Max Drawdown':<25s} {_ag_ra.max_drawdown()*100:>11.2f}% {_bm_ra.max_drawdown()*100:>11.2f}%", end="")
+    if _sp_ra: print(f" {_sp_ra.max_drawdown()*100:>11.2f}%", end="")
+    print()
+    print(f"{'='*70}\n")
+
     report = AcademicReport("CNN+LSTM PPO × SPA Day Trader")
     reports_dir = out_dir / "reports"
     report.generate(
@@ -311,7 +347,8 @@ def run_eval(model_path: Path, features_path: Path, out_dir: Path):
         benchmark_prices=bm_prices_aligned, initial_balance=10_000.0,
         periods_per_year=periods_per_year, n_trades_count=n_trades,
         output_dir=out_dir,
-        strategy_name="CNN+LSTM PPO × SPA Day Trading Strategy")
+        strategy_name="CNN+LSTM PPO × SPA Day Trading Strategy",
+        sp500_equity=sp500_equity)
 
     # Save combined results
     all_results = {
