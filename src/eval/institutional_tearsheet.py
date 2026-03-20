@@ -225,8 +225,12 @@ class StatisticalValidator:
         rng = np.random.RandomState(seed)
         permuted_sharpes = np.zeros(n_simulations)
 
+        # ศูนย์กลางผลตอบแทนให้กลายเป็น 0 (Null Hypothesis) เพื่อสุ่มใหม่
+        centered_returns = returns - np.mean(returns)
+
         for i in range(n_simulations):
-            shuffled = rng.permutation(returns)
+            # ใช้ Bootstrap (สุ่มใส่คืน) ไม่ใช่แค่การเรียงลำดับใหม่
+            shuffled = rng.choice(centered_returns, size=len(returns), replace=True)
             mean_r = np.mean(shuffled)
             std_r = np.std(shuffled, ddof=1)
             if std_r > 1e-12:
@@ -605,10 +609,11 @@ class InstitutionalTearsheet:
         perm_sharpes = stat_val.get("permuted_sharpes", np.array([]))
         p_value = stat_val.get("p_value", 1.0)
 
-        if len(perm_sharpes) == 0:
-            ax.text(0.5, 0.5, "Permutation test not available",
+        if len(perm_sharpes) == 0 or np.std(perm_sharpes) < 1e-8:
+            ax.text(0.5, 0.5, "Monte Carlo test invalid (zero variance)",
                     transform=ax.transAxes, ha="center", va="center",
-                    color=self.COLORS["fg"])
+                    color=self.COLORS["danger"])
+            ax.set_title("Monte Carlo Permutation Test", color=self.COLORS["fg"], fontweight="bold")
             return
 
         ax.hist(perm_sharpes, bins=80, density=True, alpha=0.6,

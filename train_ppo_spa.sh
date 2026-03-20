@@ -55,8 +55,8 @@ python src/train/train_ppo_spa.py \
     --train_split           0.8 \
     --device                "cuda" \
     --flat_penalty_bps      0.0 \
-    --inactivity_steps      256 \
-    --inactivity_penalty_bps 1.0 \
+    --inactivity_steps      24 \
+    --inactivity_penalty_bps 5.0 \
     --turnover_reward_coeff 0.0 \
     --trade_threshold       0.01 \
     --deadband_frac         0.05 \

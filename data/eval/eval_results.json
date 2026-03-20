@@ -1,0 +1,50 @@
+{
+  "academic_metrics": {
+    "total_return": -0.0027225100315325657,
+    "bm_total_return": 0.3468823589638579,
+    "alpha": -0.34960486899539045,
+    "annualized_return": -0.004598871857447451,
+    "annualized_volatility": 0.1046723533952732,
+    "sharpe_ratio": -0.0439358790384771,
+    "sortino_ratio": -0.04264906342351068,
+    "max_drawdown": -0.09023079699883628,
+    "win_rate": 0.5072463768115942,
+    "profit_factor": 1.1044233895567126,
+    "n_trades": 138,
+    "avg_monthly_cashflow": 347.1118365404697,
+    "eval_bars": 5181,
+    "eval_years": 0.5914383561643836
+  },
+  "train_sharpe": 0.05549364419469295,
+  "institutional": {
+    "risk_metrics": {
+      "Total Return": "-0.27%",
+      "Annualized Return": "-0.46%",
+      "Annualized Volatility": "10.47%",
+      "Sharpe Ratio": "-0.044",
+      "Sortino Ratio": "-0.043",
+      "Calmar Ratio": "-0.051",
+      "Omega Ratio (\u03b8=0)": "1.000",
+      "Max Drawdown": "-9.02%",
+      "VaR (95%)": "-0.1474%",
+      "VaR (99%)": "-0.3332%",
+      "CVaR/ES (95%)": "-0.2745%",
+      "CVaR/ES (99%)": "-0.5346%",
+      "Skewness": "-0.159",
+      "Excess Kurtosis": "21.638",
+      "Win Rate": "47.1%",
+      "Profit Factor": "1.000"
+    },
+    "stat_validation": {
+      "p_value": 0.5184,
+      "alpha_tstat": 0.9485409494596466,
+      "beta": -0.14474892429454014,
+      "r_squared": 0.4893872217839261
+    },
+    "capacity": {
+      "capacity_usd": 0.0,
+      "impact_bps_current": 0.3157709516695009,
+      "participation_rate": 9.971129391826227e-08
+    }
+  }
+}

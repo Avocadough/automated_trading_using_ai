@@ -14,7 +14,7 @@ import pandas as pd
 import torch
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import EvalCallback
 from typing import Callable
 
@@ -96,6 +96,7 @@ def build_env(
     liquidation_threshold: float = 0.5,
     sharpe_window: int = 48,
     sharpe_eta: float = 0.01,
+    n_envs: int = 1,
 ):
     def _make():
         common_kwargs = dict(
@@ -125,7 +126,13 @@ def build_env(
         allowed = {k: v for k, v in common_kwargs.items() if k in env_sig}
         return CryptoTradingEnv(**allowed)
 
-    env = DummyVecEnv([_make])
+    if n_envs > 1:
+        # ใช้ 'fork' บน Linux เพื่อแก้ปัญหา cv2 ใน Singularity, แต่ Windows ไม่รองรับ fork ต้องใช้ 'spawn'
+        import os
+        sm = "spawn" if os.name == "nt" else "fork"
+        env = SubprocVecEnv([_make for _ in range(n_envs)], start_method=sm)
+    else:
+        env = DummyVecEnv([_make])
     env = VecMonitor(env)
     return env
 
@@ -133,11 +140,12 @@ def build_env(
 def main(
     features_path: Path,
     output_prefix: Path,
-    timesteps: int = 3_000_000,
+    timesteps: int = 2_600_000,
     seed: int = 42,
     eval_every_steps: int = 50_000,
     train_split: float = 0.8,
     device_arg: str | None = None,
+    n_envs: int = 8,
     # ---- shaping knobs ----
     flat_penalty_bps: float = 0.0,
     inactivity_steps: int = 256,
@@ -218,6 +226,7 @@ def main(
     # Train env: uses shaping, computes its own norm stats (self-contained)
     train_env = build_env(
         train_df, features, window_size,
+        n_envs=n_envs,
         norm_mu=None, norm_std=None,
         **common_env_kwargs,
         flat_penalty_bps=flat_penalty_bps,
@@ -270,18 +279,18 @@ def main(
         tensorboard_log="./ppo_logs_spa/",
         # --- On-policy buffer ---
         n_steps=2048,
-        batch_size=256,
+        batch_size=512,    # 2048/512 = 4 mini-batches per update (gradient variance)
         n_epochs=10,
-        # --- Learning rate (linear decay 3e-4 → 0) ---
-        learning_rate=linear_schedule(3e-4),
+        # --- Learning rate (linear decay 5e-5 → 0) ---
+        learning_rate=linear_schedule(5e-5),     # LSTM-safe: 3e-4 kills recurrent neurons
         # --- Discount & GAE ---
         gamma=0.995,           # ~200 steps lookahead = ~8 days @ 1H
         gae_lambda=0.95,
         # --- Policy gradient ---
-        ent_coef=0.02,         # slightly less than MLP (CNN+LSTM already expressive)
+        ent_coef=0.03,         # Higher entropy → more exploration across all 3 actions
         clip_range=0.20,
         vf_coef=0.5,
-        max_grad_norm=0.5,
+        max_grad_norm=0.3,     # Tighter clipping for 2-layer LSTM stability
         # --- CNN+LSTM policy ---
         policy_kwargs=custom_policy_kwargs,
     )
@@ -318,15 +327,16 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Train PPO agent using SPA-based features")
     ap.add_argument("--features",         type=str, default="data/features/btc_1h_spa.parquet")
     ap.add_argument("--output",           type=str, default="data/models/ppo_spa_btc_1h")
-    ap.add_argument("--timesteps",        type=int, default=3_000_000)
+    ap.add_argument("--timesteps",        type=int, default=5_000_000)
     ap.add_argument("--seed",             type=int, default=42)
-    ap.add_argument("--eval_every_steps", type=int, default=50_000)
+    ap.add_argument("--eval_every_steps", type=int, default=20_000)
     ap.add_argument("--train_split",      type=float, default=0.8)
     ap.add_argument("--device",           type=str, default="cuda", choices=["cpu", "cuda", "auto"])
+    ap.add_argument("--n_envs",           type=int, default=12, help="Number of parallel environments")
 
     # shaping knobs
-    ap.add_argument("--flat_penalty_bps",       type=float, default=0.0)
-    ap.add_argument("--inactivity_steps",       type=int,   default=256)
+    ap.add_argument("--flat_penalty_bps",       type=float, default=1.0)
+    ap.add_argument("--inactivity_steps",       type=int,   default=24)
     ap.add_argument("--inactivity_penalty_bps", type=float, default=1.0)
     ap.add_argument("--turnover_reward_coeff",  type=float, default=0.0)
     ap.add_argument("--trade_threshold",        type=float, default=0.01)
@@ -344,6 +354,7 @@ if __name__ == "__main__":
         eval_every_steps=args.eval_every_steps,
         train_split=args.train_split,
         device_arg=args.device,
+        n_envs=args.n_envs,
         flat_penalty_bps=args.flat_penalty_bps,
         inactivity_steps=args.inactivity_steps,
         inactivity_penalty_bps=args.inactivity_penalty_bps,

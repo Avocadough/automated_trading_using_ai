@@ -160,8 +160,8 @@ def make_features_spa(
     # Rolling realized volatility (short vs long → regime detection)
     rvol_20 = log_ret.rolling(window=20).std()
     rvol_50 = log_ret.rolling(window=50).std()
-    df["rvol_20"] = rvol_20
-    df["rvol_50"] = rvol_50
+    df["rvol_20"] = rvol_20.clip(0, 0.5)   # Clip: raw vol is unbounded, can poison CNN
+    df["rvol_50"] = rvol_50.clip(0, 0.5)
 
     # Volatility ratio: short/long → >1 means vol expanding, <1 means contracting
     # This is a powerful regime indicator: vol expansion often precedes trends
@@ -208,14 +208,14 @@ def make_features_spa(
 
         # Volume ratio: current / MA(20) — centered at 1.0 → subtract 1 to center at 0
         # Clipped to prevent outlier during exchange outages or flash events
-        df["vol_ratio"] = ((vol / vol_ma20.replace(0, np.nan)) - 1.0).clip(-3.0, 10.0)
+        df["vol_ratio"] = ((vol / vol_ma20.replace(0, np.nan)) - 1.0).clip(-3.0, 3.0)
 
         # Directional volume conviction: sign(return) * normalized_volume
         # Positive = bullish conviction, negative = bearish conviction
         # Clipped for robustness
         df["vol_direction"] = (
             np.sign(close.diff()) * (vol / vol_ma20.replace(0, np.nan))
-        ).clip(-5.0, 5.0)
+        ).clip(-3.0, 3.0)
 
     # ============================================================
     # 5) SPA SIGNAL — Categorical {-1, 0, 1}

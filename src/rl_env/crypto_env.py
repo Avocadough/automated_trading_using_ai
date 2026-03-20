@@ -52,10 +52,10 @@ class CryptoTradingEnv(gym.Env):
         features: List[str],
         window_size: int = 64,
         initial_balance: float = 10_000.0,
-        taker_fee: float = 0.0005,        # 5 bps (Binance Futures taker)
+        taker_fee: float = 0.0005,        # 5 bps (Binance VIP 0 Taker)
         position_limit: float = 0.30,     # Max 30% of equity per trade
-        slippage_bps: float = 0.5,        # Base slippage in bps
-        reward_scale: float = 10.0,       # Scale raw reward to PPO-friendly range
+        slippage_bps: float = 1.5,        # 1.5 bps = 0.015% realistic slippage
+        reward_scale: float = 1.0,        # Reduced: prevents gradient magnification
         normalize: bool = True,
         action_mode: ActionMode = "discrete",
         seed: Optional[int] = None,
@@ -74,7 +74,7 @@ class CryptoTradingEnv(gym.Env):
         cooldown_steps: int = 1,          # Min bars between trades
         # ---- Risk management ----
         reward_clip: float = 5.0,         # Clip reward ±5 to prevent gradient spikes
-        drawdown_penalty_coeff: float = 0.5,  # Penalty weight for drawdown
+        drawdown_penalty_coeff: float = 0.3,  # Reduced: prevents panic-freezing
         liquidation_threshold: float = 0.5,   # Terminate at 50% equity loss
         # ---- Differential Sharpe ----
         sharpe_window: int = 48,          # Rolling window for reward Sharpe computation
@@ -329,9 +329,9 @@ class CryptoTradingEnv(gym.Env):
         # ---------- Component 2: Drawdown Penalty ----------
         if self.drawdown_penalty_coeff > 0 and self.equity_peak > 0:
             dd = 1.0 - (equity / self.equity_peak)
-            if dd > 0.02:  # Only penalize drawdown beyond 2%
-                # Quadratic penalty: small DD → small penalty, large DD → harsh
-                reward -= self.drawdown_penalty_coeff * self.reward_scale * (dd ** 2)
+            if dd > 0.05:  # Tolerance zone: only penalize drawdown beyond 5% (market noise)
+                # Shifted quadratic penalty: Softens the curve so 6% DD is small, 10% DD is severe
+                reward -= self.drawdown_penalty_coeff * self.reward_scale * ((dd - 0.05) ** 2)
 
         # ---------- Component 3: Optional Shaping ----------
         # Flat penalty: discourage sitting flat when market is moving
@@ -346,6 +346,16 @@ class CryptoTradingEnv(gym.Env):
         steps_since = self.current_step - self.last_trade_step
         if steps_since > self.inactivity_steps and self.inactivity_penalty_bps > 0:
             reward -= self.reward_scale * (self.inactivity_penalty_bps * 1e-4)
+
+        # NOTE: Profitability Step Bonus REMOVED.
+        # The previous "if step_return > 0: reward += bonus" created a fatal
+        # asymmetry: when the agent holds a SHORT position, any bar where BTC
+        # drops generates a positive step_return (unrealized PnL gain), giving
+        # the bonus. But BTC's long-term upward drift means {Long bars with
+        # positive returns} > {Short bars with positive returns}, so the agent
+        # learns that shorting + collecting the occasional drop bonus is safer
+        # than going Long where positive returns are frequent but also volatile.
+        # This is the mathematical root cause of 100% Short mode collapse.
 
         # ---------- Clip for stability ----------
         reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
