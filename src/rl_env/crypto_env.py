@@ -66,7 +66,7 @@ class CryptoTradingEnv(gym.Env):
         flat_penalty_bps: float = 0.0,    # Penalty per bar when flat (no position)
         inactivity_steps: int = 256,      # Bars of no trading before penalty kicks in
         inactivity_penalty_bps: float = 0.0,
-        turnover_reward_coeff: float = 0.0,
+        turnover_reward_coeff: float = -0.015, # Negative = punish churn (survival mechanic)
         trade_threshold: float = 0.02,
         # ---- Execution smoothing ----
         deadband_frac: float = 0.02,      # Don't trade if |Δnotional|/equity < deadband
@@ -81,6 +81,8 @@ class CryptoTradingEnv(gym.Env):
         sharpe_eta: float = 0.01,         # EMA decay for differential Sharpe (η)
         # ---- Dynamic Action Masking (Trend Filter) ----
         trend_mask_threshold: float = 0.03, # Prevent counter-trend actions if EMA dist > 3%
+        # ---- ADX Choppiness Gate (Sideway Shield) ----
+        adx_mask_threshold: float = -0.50,  # Force Flat if ADX_14 < this (raw ADX < ~30)
         # ---- Trend-Alignment Reward Boost ----
         trend_align_bonus: float = 2.0,     # Multiplier for trend-aligned profitable steps
     ):
@@ -174,6 +176,19 @@ class CryptoTradingEnv(gym.Env):
             self._ema_dist_200_arr = self.df["ema_dist_200"].to_numpy(dtype=np.float32)
         else:
             self._ema_dist_200_arr = None
+
+        # ---- Fast EMA (Dual-Speed Regime Detection) ----
+        if "ema_dist_50" in self.df.columns:
+            self._ema_dist_50_arr = self.df["ema_dist_50"].to_numpy(dtype=np.float32)
+        else:
+            self._ema_dist_50_arr = None
+
+        # ---- ADX Choppiness Gate Array ----
+        self.adx_mask_threshold = float(adx_mask_threshold)
+        if "ADX_14" in self.df.columns:
+            self._adx_14_arr = self.df["ADX_14"].to_numpy(dtype=np.float32)
+        else:
+            self._adx_14_arr = None
 
         # ---------- Initialize state ----------
         self.current_step = 0
@@ -285,30 +300,76 @@ class CryptoTradingEnv(gym.Env):
 
     def _apply_trend_mask(self, action: int | np.ndarray) -> int | np.ndarray:
         """
-        Dynamically mask counter-trend actions in strong macro regimes using
-        the pure, unscaled ema_dist_200 feature.
-        If Bull (ema_dist > +5%), forbid Short (0). Map to Flat (1).
-        If Bear (ema_dist < -5%), forbid Long (2). Map to Flat (1).
+        Production-grade action masking with Dual-Speed Regime Detection.
+
+        Gate 1 — ADX Choppiness Shield:
+            If ADX_14 < threshold → FORCE FLAT.
+            Prevents churning in trendless/choppy markets.
+
+        Gate 2 — Dual-Speed Directional Mask (EMA50 + EMA200):
+            Defines three regimes using BOTH fast and slow EMA distances:
+
+            STRONG BULL:  ema_dist_50 > 0 AND ema_dist_200 > 0
+                          → Price above BOTH moving averages. Forbid Short.
+            STRONG BEAR:  ema_dist_50 < 0 AND ema_dist_200 < 0
+                          → Price below BOTH moving averages. Forbid Long.
+            TRANSITION:   EMAs disagree (one > 0, other < 0)
+                          → Trend is exhausted or reversing. No mask applied;
+                            the RL agent freely chooses Long, Short, or Flat.
+
+        This dual-speed design fixes the "Perma-Bull Collapse" where the
+        lagging EMA200 remained positive during a slow-bleeding bear market,
+        preventing the agent from shorting. Now, as soon as the fast EMA50
+        crosses below price, the bull mask drops and the agent can short.
         """
-        if self._ema_dist_200_arr is None:
+        # ---- Gate 1: ADX Choppiness Shield ----
+        if self._adx_14_arr is not None:
+            causal_adx = float(self._adx_14_arr[self.current_step - 1])
+            if causal_adx < self.adx_mask_threshold:
+                if self.action_mode == "discrete":
+                    return 1  # Force Flat
+                else:
+                    return np.array([0.0], dtype=np.float32)
+
+        # ---- Gate 2: Dual-Speed Directional Mask ----
+        if self._ema_dist_200_arr is None or self._ema_dist_50_arr is None:
             return action
 
-        # CRITICAL FIX: The neural network decided this action at t (current_step - 1)
-        # We must mask it using the exact same causal information state to prevent a 1-bar lookahead bias!
-        ema_dist = self._ema_dist_200_arr[self.current_step - 1]
+        ema_slow = float(self._ema_dist_200_arr[self.current_step - 1])
+        ema_fast = float(self._ema_dist_50_arr[self.current_step - 1])
+
+        is_strong_bull = ema_fast > 0 and ema_slow > 0
+        is_strong_bear = ema_fast < 0 and ema_slow < 0
+        # Transition: EMAs disagree → no directional mask
 
         if self.action_mode == "discrete":
-            if ema_dist > self.trend_mask_threshold and action == 0:
-                return 1  # Force flat instead of short
-            elif ema_dist < -self.trend_mask_threshold and action == 2:
-                return 1  # Force flat instead of long
+            if is_strong_bull and action == 0:   # Forbid Short in Strong Bull
+                return 1
+            if is_strong_bear and action == 2:   # Forbid Long in Strong Bear
+                return 1
         else:
-            if ema_dist > self.trend_mask_threshold and action[0] < 0:
+            if is_strong_bull and action[0] < 0:
                 return np.array([0.0], dtype=np.float32)
-            elif ema_dist < -self.trend_mask_threshold and action[0] > 0:
+            if is_strong_bear and action[0] > 0:
                 return np.array([0.0], dtype=np.float32)
 
         return action
+
+    def _get_regime(self) -> str:
+        """
+        Determine the current macro regime for reward shaping.
+        Uses causal state at (current_step - 1).
+        Returns: 'bull', 'bear', or 'transition'
+        """
+        if self._ema_dist_200_arr is None or self._ema_dist_50_arr is None:
+            return "transition"
+        ema_slow = float(self._ema_dist_200_arr[self.current_step - 1])
+        ema_fast = float(self._ema_dist_50_arr[self.current_step - 1])
+        if ema_fast > 0 and ema_slow > 0:
+            return "bull"
+        elif ema_fast < 0 and ema_slow < 0:
+            return "bear"
+        return "transition"
 
     def _map_action_to_target_frac(self, action) -> float:
         """Map raw action → target position fraction."""
@@ -381,8 +442,8 @@ class CryptoTradingEnv(gym.Env):
         if self.flat_penalty_bps > 0 and abs(self.qty) < 1e-12:
             reward -= self.reward_scale * (self.flat_penalty_bps * 1e-4)
 
-        # Turnover reward: encourage decisive trading
-        if turnover > self.trade_threshold and self.turnover_reward_coeff > 0:
+        # Turnover punishment: penalize churn (negative coeff = punishment)
+        if abs(self.turnover_reward_coeff) > 1e-12 and turnover > self.trade_threshold:
             reward += self.reward_scale * (self.turnover_reward_coeff * turnover)
 
         # Inactivity penalty: fire if no trade for too long
@@ -525,28 +586,19 @@ class CryptoTradingEnv(gym.Env):
         # ---- Compute reward ----
         reward = self._compute_reward(step_return, turnover, equity_after)
 
-        # ---- Trend-Alignment Reward Boost ----
-        # Incentivise the agent to ride macro trends instead of sitting Flat.
-        # Uses the CAUSAL ema_dist_200 at (current_step - 1) — the same
-        # information state available when the action was decided.
-        # Only fires when:
-        #   1. The position is ALIGNED with the macro trend, AND
-        #   2. The step produced a POSITIVE return (profitable trade).
-        # This avoids rewarding random trend-aligned entries that lose money.
-        if (
-            self._ema_dist_200_arr is not None
-            and self.trend_align_bonus > 1.0
-            and step_return > 0
-        ):
-            causal_ema_dist = float(self._ema_dist_200_arr[self.current_step - 1])
+        # ---- Trend-Alignment Reward Boost (Symmetric, Dual-Speed) ----
+        # Only fires in STRONG regimes (both EMAs agree).
+        # In Transition (EMAs disagree), no bonus — agent learns on raw PnL.
+        # Perfectly symmetric: Long-in-Bull and Short-in-Bear get equal treatment.
+        if self.trend_align_bonus > 1.0 and step_return > 0:
+            regime = self._get_regime()
 
             if self.action_mode == "discrete":
-                # action has already been masked at this point
-                is_bull_aligned = causal_ema_dist > 0 and action == 2   # Long in Bull
-                is_bear_aligned = causal_ema_dist < 0 and action == 0   # Short in Bear
+                is_bull_aligned = regime == "bull" and action == 2   # Long in Strong Bull
+                is_bear_aligned = regime == "bear" and action == 0   # Short in Strong Bear
             else:
-                is_bull_aligned = causal_ema_dist > 0 and float(action[0]) > 0
-                is_bear_aligned = causal_ema_dist < 0 and float(action[0]) < 0
+                is_bull_aligned = regime == "bull" and float(action[0]) > 0
+                is_bear_aligned = regime == "bear" and float(action[0]) < 0
 
             if is_bull_aligned or is_bear_aligned:
                 reward *= self.trend_align_bonus
