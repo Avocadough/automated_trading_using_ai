@@ -1,6 +1,13 @@
-# Crypto Trading with Reinforcement Learning
-
-A student research scaffold for exploring PPO-based trading policies on historical BTCUSDT futures data.
+<div align="center">
+  <h1>Crypto Trading with Reinforcement Learning</h1>
+  <p>A student research scaffold for exploring PPO-based trading policies on historical BTCUSDT futures data.</p>
+  <p>
+    <img src="https://img.shields.io/badge/Python-3-3776AB?style=flat-square" alt="Python 3">
+    <img src="https://img.shields.io/badge/Stable--Baselines3-PPO-2E8B57?style=flat-square" alt="Stable Baselines3 PPO">
+    <img src="https://img.shields.io/badge/Gymnasium-RL-8A5CF5?style=flat-square" alt="Gymnasium">
+  </p>
+  <p><a href="#workflow">Workflow</a> · <a href="#getting-started">Getting started</a> · <a href="#evaluation-limits">Evaluation limits</a></p>
+</div>
 
 > **Research only.** The repository contains historical data, models and evaluation outputs from earlier experiments. They are not evidence of a profitable strategy, live execution, or readiness to trade.
 
